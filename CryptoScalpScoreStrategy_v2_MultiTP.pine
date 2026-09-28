@@ -1,0 +1,234 @@
+//@version=6
+strategy("Crypto Scalp Score Strategy v2 - Multi TP", shorttitle="CSS v2 TP3", overlay=true,
+  initial_capital=10000,
+  default_qty_type=strategy.fixed,
+  commission_type=strategy.commission.percent, commission_value=0.05,
+  slippage=3, pyramiding=0,
+  calc_on_every_tick=false, process_orders_on_close=false,
+  margin_long=100, margin_short=100)
+
+// ------------------------------ Inputs --------------------------------
+G_MODE = "Mode & Direction"
+entryMode = input.string("Score", "Entry mode", options=["Score", "Strict (all conditions)", "Baseline (HTF + RSI only)"], group=G_MODE)
+minScore = input.int(5, "Min score (Score mode, max 7)", minval=1, maxval=7, group=G_MODE)
+htfMandatory = input.bool(true, "HTF trend is mandatory", group=G_MODE)
+allowLong = input.bool(true, "Allow longs", group=G_MODE)
+allowShort = input.bool(true, "Allow shorts", group=G_MODE)
+
+G_TREND = "Trend / Regime"
+htf = input.timeframe("60", "Higher timeframe", group=G_TREND)
+htfFastLen = input.int(50, "HTF fast EMA", minval=5, group=G_TREND)
+htfSlowLen = input.int(200, "HTF slow EMA", minval=20, group=G_TREND)
+minHtfGap = input.float(0.30, "Min HTF EMA gap % (chop filter)", minval=0.0, step=0.05, group=G_TREND)
+useLocalTrend = input.bool(true, "Require chart-TF EMA50/EMA200 alignment", group=G_TREND)
+exitOnFlip = input.bool(true, "Exit if HTF trend flips against position", group=G_TREND)
+
+G_SETUP = "Pullback / Momentum"
+rsiLen = input.int(14, "RSI length", minval=2, group=G_SETUP)
+rsiOS = input.int(35, "RSI pullback level (long)", minval=10, maxval=50, group=G_SETUP)
+rsiOB = input.int(65, "RSI pullback level (short)", minval=50, maxval=90, group=G_SETUP)
+pbLen = input.int(4, "Pullback lookback (bars)", minval=1, group=G_SETUP)
+bbLen = input.int(20, "Bollinger length", minval=5, group=G_SETUP)
+bbMult = input.float(2.0, "Bollinger stdev", minval=0.5, step=0.1, group=G_SETUP)
+adxLen = input.int(14, "ADX length", minval=2, group=G_SETUP)
+adxMin = input.int(22, "ADX minimum", minval=5, group=G_SETUP)
+diAlign = input.bool(true, "ADX point also needs DI direction agreement", group=G_SETUP)
+volLen = input.int(20, "Volume SMA length", minval=2, group=G_SETUP)
+volMult = input.float(0.8, "Min volume vs SMA", minval=0.1, step=0.1, group=G_SETUP)
+maxBodyAtr = input.float(1.2, "Max trigger candle body (x ATR)", minval=0.3, step=0.1, group=G_SETUP)
+
+G_VOL = "Volatility Gate & ATR"
+atrLen = input.int(14, "ATR length", minval=2, group=G_VOL)
+minAtrPct = input.float(0.12, "Min ATR % of price", minval=0.0, step=0.01, group=G_VOL)
+maxAtrPct = input.float(1.00, "Max ATR % of price", minval=0.05, step=0.05, group=G_VOL)
+
+G_EXIT = "Exits"
+slAtrMult = input.float(1.3, "SL = ATR x", minval=0.2, step=0.1, group=G_EXIT)
+slMinPct = input.float(0.35, "SL floor %", minval=0.05, step=0.05, group=G_EXIT)
+slMaxPct = input.float(0.90, "SL cap %", minval=0.1, step=0.05, group=G_EXIT)
+
+tpMode = input.string("RR", "TP mode", options=["RR", "Percent", "ATR"], group=G_EXIT)
+
+// Multi TP Multipliers / Distances
+tp1Mult = input.float(1.0, "TP1 Factor (RR / % / ATR mult)", minval=0.1, step=0.1, group=G_EXIT)
+tp2Mult = input.float(1.5, "TP2 Factor (RR / % / ATR mult)", minval=0.1, step=0.1, group=G_EXIT)
+tp3Mult = input.float(2.0, "TP3 Factor (RR / % / ATR mult)", minval=0.1, step=0.1, group=G_EXIT)
+
+// Partial Quantity Allocations (Must add up to 100%)
+tp1QtyPct = input.float(50.0, "TP1 Quantity %", minval=0, maxval=100, step=5, group=G_EXIT)
+tp2QtyPct = input.float(30.0, "TP2 Quantity %", minval=0, maxval=100, step=5, group=G_EXIT)
+tp3QtyPct = input.float(20.0, "TP3 Quantity %", minval=0, maxval=100, step=5, group=G_EXIT)
+maxBars = input.int(32, "Time stop (bars)", minval=2, group=G_EXIT)
+
+G_RISK = "Risk & Costs"
+riskPct = input.float(0.5, "Risk per trade % of equity", minval=0.05, step=0.05, group=G_RISK)
+maxNotional = input.float(100.0, "Max notional % of equity (100 = no leverage)", minval=10, group=G_RISK)
+cooldownBars = input.int(4, "Cooldown after exit (bars)", minval=0, group=G_RISK)
+lossStreakN = input.int(3, "Pause after N consecutive losses", minval=1, maxval=10, group=G_RISK)
+pauseBars = input.int(48, "Pause length (bars)", minval=1, group=G_RISK)
+maxDayLoss = input.float(2.0, "Daily loss limit % of equity", minval=0.5, step=0.5, group=G_RISK)
+feeAssume = input.float(0.05, "Fee assumption % per side (sync with strategy())", minval=0.0, step=0.01, group=G_RISK)
+feeMult = input.float(3.0, "TP must be >= X * round-trip fees", minval=1.0, step=0.5, group=G_RISK)
+
+G_WEBHOOK = "Webhook Settings"
+passphrase = input.string("SECRET_KEY", "Webhook Secret Key / Passphrase", group=G_WEBHOOK)
+
+G_TEST = "Backtest Window & Display"
+startDate = input.time(timestamp("2022-01-01 00:00 +0000"), "Start", group=G_TEST)
+endDate = input.time(timestamp("2030-01-01 00:00 +0000"), "End", group=G_TEST)
+showTable = input.bool(true, "Show stats table", group=G_TEST)
+
+// --------------------------- Indicators --------------------------------
+f_htf_ema_fast() => ta.ema(close, htfFastLen)
+f_htf_ema_slow() => ta.ema(close, htfSlowLen)
+htfFast = request.security(syminfo.tickerid, htf, f_htf_ema_fast()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfSlow = request.security(syminfo.tickerid, htf, f_htf_ema_slow()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htf, close[1], barmerge.gaps_off, barmerge.lookahead_off)
+
+htfGapPct = math.abs(htfFast - htfSlow) / htfSlow * 100
+htfBull = htfFast > htfSlow and htfClose > htfSlow and htfGapPct >= minHtfGap
+htfBear = htfFast < htfSlow and htfClose < htfSlow and htfGapPct >= minHtfGap
+
+ema50L = ta.ema(close, 50)
+ema200L = ta.ema(close, 200)
+localBull = not useLocalTrend or (ema50L > ema200L)
+localBear = not useLocalTrend or (ema50L < ema200L)
+
+rsi = ta.rsi(close, rsiLen)
+[macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+[bbMid, bbUp, bbLo] = ta.bb(close, bbLen, bbMult)
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+vw = ta.vwap(hlc3)
+atr = ta.atr(atrLen)
+atrPct = atr / close * 100
+volSma = ta.sma(volume, volLen)
+
+// ----------------------------- Conditions ------------------------------
+b2i(bool c) => c ? 1 : 0
+
+pbLong = ta.lowest(rsi, pbLen) <= rsiOS
+pbShort = ta.highest(rsi, pbLen) >= rsiOB
+bodyOK = math.abs(close - open) <= maxBodyAtr * atr
+trigLong = rsi > rsi[1] and close > open and bodyOK
+trigShort = rsi < rsi[1] and close < open and bodyOK
+
+macdUp = macdHist > macdHist[1]
+macdDn = macdHist < macdHist[1]
+liqOK = volume > volSma * volMult
+adxLongOK = adx >= adxMin and (not diAlign or diP > diM)
+adxShortOK = adx >= adxMin and (not diAlign or diM > diP)
+bbLong = ta.lowest(low, pbLen) <= bbLo
+bbShort = ta.highest(high, pbLen) >= bbUp
+
+MAX_SCORE = 7
+longScore = b2i(htfBull) + b2i(pbLong) + b2i(macdUp) + b2i(close < vw) + b2i(liqOK) + b2i(adxLongOK) + b2i(bbLong)
+shortScore = b2i(htfBear) + b2i(pbShort) + b2i(macdDn) + b2i(close > vw) + b2i(liqOK) + b2i(adxShortOK) + b2i(bbShort)
+
+volGateOK = atrPct >= minAtrPct and atrPct <= maxAtrPct
+
+// ----------------------------- Exit distances --------------------------
+float slDist = math.min(math.max(atr * slAtrMult, close * slMinPct / 100), close * slMaxPct / 100)
+
+// Helper function to calculate distance based on selected TP mode
+f_calc_tp_dist(float factor) =>
+    switch tpMode
+        "Percent" => close * factor / 100
+        "ATR"     => atr * factor
+        => slDist * factor
+
+float tp1Dist = f_calc_tp_dist(tp1Mult)
+float tp2Dist = f_calc_tp_dist(tp2Mult)
+float tp3Dist = f_calc_tp_dist(tp3Mult)
+
+feeOK = (tp1Dist / close * 100) >= feeMult * 2 * feeAssume
+
+// ----------------------------- Gates -----------------------------------
+inRange = time >= startDate and time <= endDate
+var float dayStartEq = strategy.initial_capital
+if timeframe.change("D")
+    dayStartEq := strategy.equity
+dayOK = strategy.equity > dayStartEq * (1 - maxDayLoss / 100)
+
+int lastExitBar = strategy.closedtrades > 0 ? strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) : na
+cooldownOK = na(lastExitBar) or (bar_index - lastExitBar > cooldownBars)
+
+int nClosed = strategy.closedtrades
+int consLoss = 0
+if nClosed > 0
+    for k = 1 to math.min(nClosed, lossStreakN)
+        if strategy.closedtrades.profit(nClosed - k) < 0
+            consLoss += 1
+        else
+            break
+streakPause = consLoss >= lossStreakN and not na(lastExitBar) and (bar_index - lastExitBar <= pauseBars)
+
+flat = strategy.position_size == 0
+commonOK = volGateOK and feeOK and cooldownOK and dayOK and inRange and flat and not streakPause
+
+longSetup = switch entryMode
+    "Score" => longScore >= minScore and (not htfMandatory or htfBull)
+    "Strict (all conditions)" => longScore == MAX_SCORE
+    => htfBull and pbLong
+shortSetup = switch entryMode
+    "Score" => shortScore >= minScore and (not htfMandatory or htfBear)
+    "Strict (all conditions)" => shortScore == MAX_SCORE
+    => htfBear and pbShort
+
+longSig = allowLong and longSetup and localBull and trigLong and commonOK
+shortSig = allowShort and shortSetup and localBear and trigShort and commonOK
+
+// ----------------------------- Sizing ----------------------------------
+float qtyRisk = strategy.equity * riskPct / 100 / slDist
+float qtyCap = strategy.equity * maxNotional / 100 / close
+float totalQty = math.min(qtyRisk, qtyCap)
+
+// Partial Quantities
+float qty1 = totalQty * (tp1QtyPct / 100.0)
+float qty2 = totalQty * (tp2QtyPct / 100.0)
+float qty3 = totalQty * (tp3QtyPct / 100.0)
+
+// ----------------------------- Webhook Payloads ------------------------
+msgLongEntry = '{"passphrase":"' + passphrase + '", "action":"buy", "symbol":"' + syminfo.ticker + '", "qty":' + str.tostring(totalQty) + ', "sl":' + str.tostring(close - slDist) + ', "tp1":' + str.tostring(close + tp1Dist) + ', "tp2":' + str.tostring(close + tp2Dist) + ', "tp3":' + str.tostring(close + tp3Dist) + '}'
+msgShortEntry = '{"passphrase":"' + passphrase + '", "action":"sell", "symbol":"' + syminfo.ticker + '", "qty":' + str.tostring(totalQty) + ', "sl":' + str.tostring(close + slDist) + ', "tp1":' + str.tostring(close - tp1Dist) + ', "tp2":' + str.tostring(close - tp2Dist) + ', "tp3":' + str.tostring(close - tp3Dist) + '}'
+msgExit = '{"passphrase":"' + passphrase + '", "action":"close", "symbol":"' + syminfo.ticker + '"}'
+
+// ----------------------------- Orders ----------------------------------
+slTicks = math.max(1, math.round(slDist / syminfo.mintick))
+tp1Ticks = math.max(1, math.round(tp1Dist / syminfo.mintick))
+tp2Ticks = math.max(1, math.round(tp2Dist / syminfo.mintick))
+tp3Ticks = math.max(1, math.round(tp3Dist / syminfo.mintick))
+
+if longSig and totalQty > 0
+    strategy.entry("L", strategy.long, qty=totalQty, alert_message=msgLongEntry)
+    if qty1 > 0
+        strategy.exit("TP1", "L", qty=qty1, profit=tp1Ticks, loss=slTicks, alert_message=msgExit)
+    if qty2 > 0
+        strategy.exit("TP2", "L", qty=qty2, profit=tp2Ticks, loss=slTicks, alert_message=msgExit)
+    if qty3 > 0
+        strategy.exit("TP3", "L", qty=qty3, profit=tp3Ticks, loss=slTicks, alert_message=msgExit)
+
+if shortSig and totalQty > 0
+    strategy.entry("S", strategy.short, qty=totalQty, alert_message=msgShortEntry)
+    if qty1 > 0
+        strategy.exit("TP1", "S", qty=qty1, profit=tp1Ticks, loss=slTicks, alert_message=msgExit)
+    if qty2 > 0
+        strategy.exit("TP2", "S", qty=qty2, profit=tp2Ticks, loss=slTicks, alert_message=msgExit)
+    if qty3 > 0
+        strategy.exit("TP3", "S", qty=qty3, profit=tp3Ticks, loss=slTicks, alert_message=msgExit)
+
+// Time stop
+if strategy.opentrades > 0
+    barsIn = bar_index - strategy.opentrades.entry_bar_index(0)
+    if barsIn >= maxBars
+        strategy.close_all(comment="Time stop", alert_message=msgExit)
+// HTF flip exit
+if exitOnFlip
+    if strategy.position_size > 0 and htfBear
+        strategy.close("L", comment="HTF flip", alert_message=msgExit)
+    if strategy.position_size < 0 and htfBull
+        strategy.close("S", comment="HTF flip", alert_message=msgExit)
+
+// ----------------------------- Visuals ---------------------------------
+plot(vw, "VWAP", color=color.new(color.orange, 30))
+plotshape(longSig, "Long signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.tiny)
+plotshape(shortSig, "Short signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.tiny)
