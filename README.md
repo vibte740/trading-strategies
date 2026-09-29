@@ -20,7 +20,26 @@ Based on Shadow Intel Trades methodology (TikTok @shadowinteltrades).
 - `AMDStrategy` - Full pipeline: consolidation → sweep → distribution → POC pullback
 - `backtest_signals()` - Vectorized backtest with equity curve
 
-### 2. Pattern Matcher Engine (`pattern_matcher.py`)
+### 2. Crypto Scalper — Multi-Filter EMA + VWAP + ATR (`crypto_scalper.py`) ★ LIVE main strategy
+Python port of the Pine v6 strategy "Crypto Scalper - Multi-Filter EMA + VWAP + ATR".
+
+**Logic:**
+- **Entry**: EMA9 crosses EMA21 AND close > EMA200 AND close > session VWAP AND ADX > 20
+- **Exits**: ATR-based SL (1.2×ATR) / TP (2.0×ATR) fixed from the signal bar's close
+- **Fills**: signal on bar close → market entry at next bar open; TradingView intra-bar SL/TP heuristic; 100% equity per trade, 0.05%/side commission
+- **Indicators**: Pine-compatible EMA (SMA-seeded), Wilder RMA ATR/ADX, UTC-day session VWAP
+
+**Key functions:**
+- `add_indicators(df)` - fast/slow/htf EMAs, session VWAP, ATR, ADX, long/short signals
+- `backtest(df)` - signal→next-open fills, ATR SL/TP, equity curve
+- `report(trades, curve)` - trades, win rate, net profit, profit factor, max drawdown
+- `load_csv(path)` / `load_ccxt(symbol, timeframe, limit)` - data loaders
+
+**Live deployment (2026-09-29):**
+- Freqtrade bot (`trading-gateway`): `CryptoScalperStrategy`, 5m, dry-run, long-only on spot
+- Gateway native engine + Strategy Lab (`/api/v1/lab/page`): `strategy=crypto_scalper` with visual EMA/VWAP overlays and Pine v5 export
+
+### 3. Pattern Matcher Engine (`pattern_matcher.py`)
 K-NN pattern matching for probabilistic forward return analysis.
 
 **Logic:**
@@ -67,6 +86,13 @@ results = backtest_signals(df, signals, risk_per_trade=0.02)
 print(f"Trades: {results['trades']}, WR: {results['winrate']:.1%}")
 ```
 
+### Crypto Scalper
+```bash
+python crypto_scalper.py data.csv              # CSV with timestamp,open,high,low,close,volume
+python crypto_scalper.py --ccxt BTC/USDT 5m 5000   # needs `pip install ccxt`
+# writes scalper_trades.csv + prints win rate / profit factor / drawdown
+```
+
 ### Pattern Matcher
 ```python
 from pattern_matcher import PatternMatcher, PatternConfig, analyze_current_pattern
@@ -107,6 +133,7 @@ if signals:
 ```
 trading-strategies/
 ├── amd_poc_strategy.py     # AMD Pattern + POC Volume Strategy
+├── crypto_scalper.py       # Crypto Scalper (EMA + VWAP + ATR) ★ live main strategy
 ├── pattern_matcher.py      # K-NN Pattern Matching Engine
 ├── README.md               # This file
 └── requirements.txt        # Python dependencies
