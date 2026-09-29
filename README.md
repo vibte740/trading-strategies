@@ -140,6 +140,7 @@ trading-strategies/
 ```
 
 ## Notion Documentation
+- Crypto Scalper (live main): `3ea239d8-18ee-81bf-9707-de672d4c37e9`
 - AMD Strategy: `3e7239d8-18ee-8133-a2c8-d7343cd84511`
 - Pattern Matcher: `3e7239d8-18ee-819a-b039-eb66bbfe5f95`
 
