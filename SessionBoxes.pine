@@ -1,0 +1,75 @@
+//@version=6
+indicator("Session Boxes (UTC)", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ── Inputs ──────────────────────────────────────────────────────────────
+var g1 = "SIA"
+showSia  = input.bool(true, "Show", group=g1)
+sessSia  = input.session("0000-0700", "Session (UTC)", group=g1)
+colSia   = input.color(color.new(color.gray, 0), "Color", group=g1)
+
+var g2 = "LONDON"
+showLdn  = input.bool(true, "Show", group=g2)
+sessLdn  = input.session("0700-1000", "Session (UTC)", group=g2)
+colLdn   = input.color(color.new(color.blue, 0), "Color", group=g2)
+
+var g3 = "NY AM"
+showNyAm = input.bool(true, "Show", group=g3)
+sessNyAm = input.session("1200-1500", "Session (UTC)", group=g3)
+colNyAm  = input.color(color.new(color.orange, 0), "Color", group=g3)
+
+var g4 = "LONDON CLOSE"
+showLc   = input.bool(true, "Show", group=g4)
+sessLc   = input.session("1500-1700", "Session (UTC)", group=g4)
+colLc    = input.color(color.new(color.purple, 0), "Color", group=g4)
+
+var g5 = "NY PM"
+showNyPm = input.bool(true, "Show", group=g5)
+sessNyPm = input.session("1830-2100", "Session (UTC)", group=g5)
+colNyPm  = input.color(color.new(color.teal, 0), "Color", group=g5)
+
+var gs = "Style"
+fillTransp = input.int(92, "Fill transparency", minval=0, maxval=100, group=gs)
+borderW    = input.int(1, "Border width", minval=1, maxval=4, group=gs)
+showRole   = input.bool(false, "Append role to label (build range / trade / optional)", group=gs)
+txtSize    = input.string("normal", "Label size", options=["tiny", "small", "normal", "large"], group=gs)
+
+// ── Session box: live-updating high/low range with name above the top border ──
+drawSession(string sess, string name, color col, bool enabled) =>
+    var box   bx = na
+    var label lb = na
+    var float hi = na
+    var float lo = na
+
+    inSess  = enabled and not na(time(timeframe.period, sess, "UTC"))
+    newSess = inSess and not inSess[1]
+
+    if newSess
+        hi := high
+        lo := low
+        bx := box.new(bar_index, hi, bar_index, lo, border_color=col, border_width=borderW,
+                      bgcolor=color.new(col, fillTransp))
+        lb := label.new(bar_index, hi, name, style=label.style_label_lower_left,
+                        color=na, textcolor=col, size=txtSize)
+    else if inSess
+        hi := math.max(hi, high)
+        lo := math.min(lo, low)
+        box.set_right(bx, bar_index)
+        box.set_top(bx, hi)
+        box.set_bottom(bx, lo)
+        label.set_y(lb, hi)
+
+    inSess
+
+if timeframe.isdwm
+    runtime.error("Use an intraday timeframe (e.g. 1m–1h) for session boxes.")
+
+roleSia = showRole ? " · build range" : ""
+roleLdn = showRole ? " · trade"       : ""
+roleNy  = showRole ? " · trade"       : ""
+roleOpt = showRole ? " · optional"    : ""
+
+drawSession(sessSia,  "SIA" + roleSia,          colSia,  showSia)
+drawSession(sessLdn,  "LONDON" + roleLdn,       colLdn,  showLdn)
+drawSession(sessNyAm, "NY AM ⭐️" + roleNy,      colNyAm, showNyAm)
+drawSession(sessLc,   "LONDON CLOSE" + roleOpt, colLc,   showLc)
+drawSession(sessNyPm, "NY PM" + roleOpt,        colNyPm, showNyPm)
