@@ -1,0 +1,78 @@
+//@version=6
+strategy("ADX + VWAP + RVOL(time)", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     initial_capital=10000, pyramiding=0,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=2, calc_on_every_tick=false)
+
+// ---------- Inputs ----------
+grpF = "Filters (toggle to A/B test each claim)"
+useADX  = input.bool(true, "Use ADX",  group=grpF)
+useVWAP = input.bool(true, "Use VWAP", group=grpF)
+useRVOL = input.bool(true, "Use RVOL-time", group=grpF)
+
+grpP = "Params"
+adxLen   = input.int(14, "ADX length", minval=2, group=grpP)
+adxMin   = input.float(22.0, "ADX min", group=grpP)
+rvLook   = input.int(20, "RVOL lookback (same time-of-day, N sessions)", minval=5, group=grpP)
+rvMin    = input.float(1.5, "RVOL min", step=0.1, group=grpP)
+atrLen   = input.int(14, "ATR length", group=grpP)
+slMult   = input.float(1.5, "Stop ATR mult", step=0.1, group=grpP)
+tpMult   = input.float(3.0, "Target ATR mult", step=0.1, group=grpP)
+allowShort = input.bool(true, "Allow shorts", group=grpP)
+
+grpR = "Risk"
+maxDD = input.float(20.0, "Max drawdown % (halts strategy)", group=grpR)
+strategy.risk.max_drawdown(maxDD, strategy.percent_of_equity)
+
+// ---------- Indicators ----------
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+vw  = ta.vwap(hlc3)
+atr = ta.atr(atrLen)
+
+// RVOL by time-of-day (intraday TFs only)
+var rvMap = map.new<int, array<float>>()
+key = hour * 60 + minute
+if not rvMap.contains(key)
+    rvMap.put(key, array.new<float>())
+bucket = rvMap.get(key)
+avgVol = bucket.size() >= 5 ? bucket.avg() : na
+rvol = na(avgVol) or avgVol == 0 ? na : volume / avgVol
+if barstate.isconfirmed
+    bucket.push(volume)
+    if bucket.size() > rvLook
+        bucket.shift()
+
+// ---------- Conditions ----------
+adxOkL = not useADX  or (adx > adxMin and adx > adx[1] and diP > diM)
+adxOkS = not useADX  or (adx > adxMin and adx > adx[1] and diM > diP)
+vwOkL  = not useVWAP or close > vw
+vwOkS  = not useVWAP or close < vw
+rvOk   = not useRVOL or (not na(rvol) and rvol > rvMin)
+
+longSig  = adxOkL and vwOkL and rvOk and barstate.isconfirmed
+shortSig = allowShort and adxOkS and vwOkS and rvOk and barstate.isconfirmed
+
+// ---------- Orders ----------
+if longSig and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if shortSig and strategy.position_size == 0
+    strategy.entry("S", strategy.short)
+
+if strategy.position_size > 0
+    strategy.exit("xL", "L",
+         stop  = strategy.position_avg_price - slMult * atr,
+         limit = strategy.position_avg_price + tpMult * atr)
+    if useVWAP and ta.crossunder(close, vw)
+        strategy.close("L", comment="VWAP loss")
+
+if strategy.position_size < 0
+    strategy.exit("xS", "S",
+         stop  = strategy.position_avg_price + slMult * atr,
+         limit = strategy.position_avg_price - tpMult * atr)
+    if useVWAP and ta.crossover(close, vw)
+        strategy.close("S", comment="VWAP reclaim")
+
+// ---------- Plots ----------
+plot(vw, "VWAP", color=color.orange, linewidth=2)
+bgcolor(longSig ? color.new(color.green, 88) : shortSig ? color.new(color.red, 88) : na)
