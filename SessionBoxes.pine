@@ -90,9 +90,10 @@ fillTransp = input.int(92, "Fill transparency", minval=0, maxval=100, group=gs)
 borderW    = input.int(1, "Border width", minval=1, maxval=4, group=gs)
 showRole   = input.bool(false, "Append role to label", group=gs)
 txtSize    = input.string("small", "Label size", options=["tiny", "small", "normal", "large"], group=gs)
+lblGap     = input.int(4, "Label spacing (bars) between same-start sessions", minval=0, maxval=50, group=gs)
 
-// ── Session box: live high/low range, name above the top border ─────────
-drawSession(string sess, string name, color col, bool enabled) =>
+// ── Session box: live high/low range, label shifted right by slot ───────
+drawSession(string sess, string name, color col, bool enabled, int slot) =>
     var box   bx = na
     var label lb = na
     var float hi = na
@@ -106,7 +107,7 @@ drawSession(string sess, string name, color col, bool enabled) =>
         lo := low
         bx := box.new(bar_index, hi, bar_index, lo, border_color=col, border_width=borderW,
                       bgcolor=color.new(col, fillTransp))
-        lb := label.new(bar_index, hi, name, style=label.style_label_lower_left,
+        lb := label.new(bar_index + slot * lblGap, hi, name, style=label.style_label_lower_left,
                         color=na, textcolor=col, size=txtSize)
     else if inSess
         hi := math.max(hi, high)
@@ -125,24 +126,25 @@ roleBuild = showRole ? " · build" : ""
 roleTrade = showRole ? " · trade" : ""
 roleOpt   = showRole ? " · opt"   : ""
 
+// Slot = position in the row of labels that share a start time
 // Core
-drawSession(sessASIA, "ASIA" + roleBuild,    colASIA, showASIA)
-drawSession(sessLdn,  "LDN" + roleTrade,     colLdn,  showLdn)
-drawSession(sessNyAm, "NY AM ⭐️" + roleTrade, colNyAm, showNyAm)
-drawSession(sessLc,   "LC" + roleOpt,        colLc,   showLc)
-drawSession(sessNyPm, "NY PM" + roleOpt,     colNyPm, showNyPm)
+drawSession(sessASIA, "ASIA" + roleBuild,    colASIA, showASIA, 0)  // 0000
+drawSession(sessLdn,  "LDN" + roleTrade,     colLdn,  showLdn,  0)  // 0700
+drawSession(sessNyAm, "NY AM ⭐️" + roleTrade, colNyAm, showNyAm, 0)  // 1200
+drawSession(sessLc,   "LC" + roleOpt,        colLc,   showLc,   0)  // 1500
+drawSession(sessNyPm, "NY PM" + roleOpt,     colNyPm, showNyPm, 0)  // 1830
 
 // Asia detail
-drawSession(sessSyd, "SYD", colSyd, showSyd)
-drawSession(sessTky, "TKY", colTky, showTky)
-drawSession(sessCn,  "CN",  colCn,  showCn)
-drawSession(sessHk,  "HK",  colHk,  showHk)
-drawSession(sessMy,  "MY",  colMy,  showMy)
-drawSession(sessIn,  "IN",  colIn,  showIn)
+drawSession(sessSyd, "SYD", colSyd, showSyd, 0)  // 2300
+drawSession(sessTky, "TKY", colTky, showTky, 1)  // 0000 (with ASIA)
+drawSession(sessCn,  "CN",  colCn,  showCn,  0)  // 0130
+drawSession(sessHk,  "HK",  colHk,  showHk,  1)  // 0130 (with CN)
+drawSession(sessMy,  "MY",  colMy,  showMy,  0)  // 0100
+drawSession(sessIn,  "IN",  colIn,  showIn,  0)  // 0345
 
 // Overlaps & gaps
-drawSession(sessAsLd, "AS/LD", colAsLd, showAsLd)
-drawSession(sessLdNy, "LD/NY", colLdNy, showLdNy)
-drawSession(sessLch,  "LCH",   colLch,  showLch)
-drawSession(sessGap,  "GAP",   colGap,  showGap)
-drawSession(sessRll,  "RLL",   colRll,  showRll)
+drawSession(sessAsLd, "AS/LD", colAsLd, showAsLd, 1)  // 0700 (with LDN)
+drawSession(sessLdNy, "LD/NY", colLdNy, showLdNy, 1)  // 1200 (with NY AM)
+drawSession(sessLch,  "LCH",   colLch,  showLch,  0)
+drawSession(sessGap,  "GAP",   colGap,  showGap,  0)
+drawSession(sessRll,  "RLL",   colRll,  showRll,  0)
