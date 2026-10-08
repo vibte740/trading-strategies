@@ -1,39 +1,97 @@
 //@version=6
 indicator("Session Boxes (UTC)", overlay=true, max_boxes_count=500, max_labels_count=500)
 
-// ── Inputs ──────────────────────────────────────────────────────────────
-var g1 = "ASIA"
-showASIA  = input.bool(true, "Show", group=g1)
-sessASIA  = input.session("0000-0700", "Session (UTC)", group=g1)
-colASIA   = input.color(color.new(color.gray, 0), "Color", group=g1)
+// ── Core sessions ───────────────────────────────────────────────────────
+var g1 = "ASIA (main)"
+showASIA = input.bool(true, "Show", group=g1)
+sessASIA = input.session("0000-0700", "Session (UTC)", group=g1)
+colASIA  = input.color(color.new(color.gray, 0), "Color", group=g1)
 
-var g2 = "LONDON"
-showLdn  = input.bool(true, "Show", group=g2)
-sessLdn  = input.session("0700-1000", "Session (UTC)", group=g2)
-colLdn   = input.color(color.new(color.blue, 0), "Color", group=g2)
+var g2 = "LDN"
+showLdn = input.bool(true, "Show", group=g2)
+sessLdn = input.session("0700-1000", "Session (UTC)", group=g2)
+colLdn  = input.color(color.new(color.blue, 0), "Color", group=g2)
 
 var g3 = "NY AM"
 showNyAm = input.bool(true, "Show", group=g3)
 sessNyAm = input.session("1200-1500", "Session (UTC)", group=g3)
 colNyAm  = input.color(color.new(color.orange, 0), "Color", group=g3)
 
-var g4 = "LONDON CLOSE"
-showLc   = input.bool(true, "Show", group=g4)
-sessLc   = input.session("1500-1700", "Session (UTC)", group=g4)
-colLc    = input.color(color.new(color.purple, 0), "Color", group=g4)
+var g4 = "LC (London close)"
+showLc = input.bool(true, "Show", group=g4)
+sessLc = input.session("1500-1700", "Session (UTC)", group=g4)
+colLc  = input.color(color.new(color.purple, 0), "Color", group=g4)
 
 var g5 = "NY PM"
 showNyPm = input.bool(true, "Show", group=g5)
 sessNyPm = input.session("1830-2100", "Session (UTC)", group=g5)
 colNyPm  = input.color(color.new(color.teal, 0), "Color", group=g5)
 
+// ── Asia detail ─────────────────────────────────────────────────────────
+var a1 = "SYD"
+showSyd = input.bool(true, "Show", group=a1)
+sessSyd = input.session("2300-0600", "Session (UTC)", group=a1)
+colSyd  = input.color(color.new(color.silver, 0), "Color", group=a1)
+
+var a2 = "TKY"
+showTky = input.bool(true, "Show", group=a2)
+sessTky = input.session("0000-0630", "Session (UTC)", group=a2)
+colTky  = input.color(color.new(color.red, 0), "Color", group=a2)
+
+var a3 = "CN"
+showCn = input.bool(true, "Show", group=a3)
+sessCn = input.session("0130-0700", "Session (UTC)", group=a3)
+colCn  = input.color(color.new(color.maroon, 0), "Color", group=a3)
+
+var a4 = "HK"
+showHk = input.bool(true, "Show", group=a4)
+sessHk = input.session("0130-0800", "Session (UTC)", group=a4)
+colHk  = input.color(color.new(color.fuchsia, 0), "Color", group=a4)
+
+var a5 = "MY"
+showMy = input.bool(true, "Show", group=a5)
+sessMy = input.session("0100-0900", "Session (UTC)", group=a5)
+colMy  = input.color(color.new(color.green, 0), "Color", group=a5)
+
+var a6 = "IN"
+showIn = input.bool(true, "Show", group=a6)
+sessIn = input.session("0345-1000", "Session (UTC)", group=a6)
+colIn  = input.color(color.new(color.lime, 0), "Color", group=a6)
+
+// ── Overlaps & gaps ─────────────────────────────────────────────────────
+var o1 = "AS/LD (overlap)"
+showAsLd = input.bool(true, "Show", group=o1)
+sessAsLd = input.session("0700-0900", "Session (UTC)", group=o1)
+colAsLd  = input.color(color.new(color.yellow, 0), "Color", group=o1)
+
+var o2 = "LD/NY (overlap)"
+showLdNy = input.bool(true, "Show", group=o2)
+sessLdNy = input.session("1200-1600", "Session (UTC)", group=o2)
+colLdNy  = input.color(color.new(color.aqua, 0), "Color", group=o2)
+
+var o3 = "LCH (London lunch)"
+showLch = input.bool(false, "Show", group=o3)
+sessLch = input.session("1000-1200", "Session (UTC)", group=o3)
+colLch  = input.color(color.new(color.gray, 30), "Color", group=o3)
+
+var o4 = "GAP (LC to NY PM)"
+showGap = input.bool(false, "Show", group=o4)
+sessGap = input.session("1700-1830", "Session (UTC)", group=o4)
+colGap  = input.color(color.new(color.gray, 30), "Color", group=o4)
+
+var o5 = "RLL (rollover)"
+showRll = input.bool(false, "Show", group=o5)
+sessRll = input.session("2100-0000", "Session (UTC)", group=o5)
+colRll  = input.color(color.new(color.gray, 30), "Color", group=o5)
+
+// ── Style ───────────────────────────────────────────────────────────────
 var gs = "Style"
 fillTransp = input.int(92, "Fill transparency", minval=0, maxval=100, group=gs)
 borderW    = input.int(1, "Border width", minval=1, maxval=4, group=gs)
-showRole   = input.bool(false, "Append role to label (build range / trade / optional)", group=gs)
-txtSize    = input.string("normal", "Label size", options=["tiny", "small", "normal", "large"], group=gs)
+showRole   = input.bool(false, "Append role to label", group=gs)
+txtSize    = input.string("small", "Label size", options=["tiny", "small", "normal", "large"], group=gs)
 
-// ── Session box: live-updating high/low range with name above the top border ──
+// ── Session box: live high/low range, name above the top border ─────────
 drawSession(string sess, string name, color col, bool enabled) =>
     var box   bx = na
     var label lb = na
@@ -63,13 +121,28 @@ drawSession(string sess, string name, color col, bool enabled) =>
 if timeframe.isdwm
     runtime.error("Use an intraday timeframe (e.g. 1m–1h) for session boxes.")
 
-roleASIA = showRole ? " · build range" : ""
-roleLdn = showRole ? " · trade"       : ""
-roleNy  = showRole ? " · trade"       : ""
-roleOpt = showRole ? " · optional"    : ""
+roleBuild = showRole ? " · build" : ""
+roleTrade = showRole ? " · trade" : ""
+roleOpt   = showRole ? " · opt"   : ""
 
-drawSession(sessASIA,  "ASIA" + roleASIA,          colASIA,  showASIA)
-drawSession(sessLdn,  "LONDON" + roleLdn,       colLdn,  showLdn)
-drawSession(sessNyAm, "NY AM ⭐️" + roleNy,      colNyAm, showNyAm)
-drawSession(sessLc,   "LONDON CLOSE" + roleOpt, colLc,   showLc)
-drawSession(sessNyPm, "NY PM" + roleOpt,        colNyPm, showNyPm)
+// Core
+drawSession(sessASIA, "ASIA" + roleBuild,    colASIA, showASIA)
+drawSession(sessLdn,  "LDN" + roleTrade,     colLdn,  showLdn)
+drawSession(sessNyAm, "NY AM ⭐️" + roleTrade, colNyAm, showNyAm)
+drawSession(sessLc,   "LC" + roleOpt,        colLc,   showLc)
+drawSession(sessNyPm, "NY PM" + roleOpt,     colNyPm, showNyPm)
+
+// Asia detail
+drawSession(sessSyd, "SYD", colSyd, showSyd)
+drawSession(sessTky, "TKY", colTky, showTky)
+drawSession(sessCn,  "CN",  colCn,  showCn)
+drawSession(sessHk,  "HK",  colHk,  showHk)
+drawSession(sessMy,  "MY",  colMy,  showMy)
+drawSession(sessIn,  "IN",  colIn,  showIn)
+
+// Overlaps & gaps
+drawSession(sessAsLd, "AS/LD", colAsLd, showAsLd)
+drawSession(sessLdNy, "LD/NY", colLdNy, showLdNy)
+drawSession(sessLch,  "LCH",   colLch,  showLch)
+drawSession(sessGap,  "GAP",   colGap,  showGap)
+drawSession(sessRll,  "RLL",   colRll,  showRll)
