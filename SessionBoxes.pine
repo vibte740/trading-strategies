@@ -2,10 +2,10 @@
 indicator("Session Boxes (UTC)", overlay=true, max_boxes_count=500, max_labels_count=500)
 
 // ── Inputs ──────────────────────────────────────────────────────────────
-var g1 = "SIA"
-showSia  = input.bool(true, "Show", group=g1)
-sessSia  = input.session("0000-0700", "Session (UTC)", group=g1)
-colSia   = input.color(color.new(color.gray, 0), "Color", group=g1)
+var g1 = "ASIA"
+showASIA  = input.bool(true, "Show", group=g1)
+sessASIA  = input.session("0000-0700", "Session (UTC)", group=g1)
+colASIA   = input.color(color.new(color.gray, 0), "Color", group=g1)
 
 var g2 = "LONDON"
 showLdn  = input.bool(true, "Show", group=g2)
@@ -63,12 +63,12 @@ drawSession(string sess, string name, color col, bool enabled) =>
 if timeframe.isdwm
     runtime.error("Use an intraday timeframe (e.g. 1m–1h) for session boxes.")
 
-roleSia = showRole ? " · build range" : ""
+roleASIA = showRole ? " · build range" : ""
 roleLdn = showRole ? " · trade"       : ""
 roleNy  = showRole ? " · trade"       : ""
 roleOpt = showRole ? " · optional"    : ""
 
-drawSession(sessSia,  "SIA" + roleSia,          colSia,  showSia)
+drawSession(sessASIA,  "ASIA" + roleASIA,          colASIA,  showASIA)
 drawSession(sessLdn,  "LONDON" + roleLdn,       colLdn,  showLdn)
 drawSession(sessNyAm, "NY AM ⭐️" + roleNy,      colNyAm, showNyAm)
 drawSession(sessLc,   "LONDON CLOSE" + roleOpt, colLc,   showLc)
