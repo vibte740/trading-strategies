@@ -1,0 +1,57 @@
+//@version=6
+strategy("Meme Coin Market Structure & PA", overlay=true, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- 1. Moving Averages (Trend Filter) ---
+ema50Length = input.int(50, title="EMA 50 Length", group="Trend Filters")
+ema200Length = input.int(200, title="EMA 200 Length", group="Trend Filters")
+ema50 = ta.ema(close, ema50Length)
+ema200 = ta.ema(close, ema200Length)
+
+plot(ema50, color=color.new(color.blue, 0), title="EMA 50", linewidth=2)
+plot(ema200, color=color.new(color.white, 0), title="EMA 200", linewidth=2)
+
+// --- 2. Supertrend (Volatility Trend) ---
+atrPeriod = input.int(10, title="Supertrend ATR Length", group="Supertrend")
+factor = input.float(3.0, title="Supertrend Factor", group="Supertrend")
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+upTrend = direction < 0 ? supertrend : na
+downTrend = direction > 0 ? supertrend : na
+
+plot(upTrend, color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2, title="Up Trend")
+plot(downTrend, color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2, title="Down Trend")
+
+// --- 3. RSI (Momentum / Overbought Filter) ---
+rsiLength = input.int(14, title="RSI Length", group="Momentum")
+rsiOverbought = input.int(75, title="RSI Overbought Level", group="Momentum")
+rsi = ta.rsi(close, rsiLength)
+
+// --- 4. Market Structure (Pivot Points for PA) ---
+pivotLeft = input.int(5, title="Pivot Left Bars", group="Market Structure")
+pivotRight = input.int(5, title="Pivot Right Bars", group="Market Structure")
+
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low, pivotLeft, pivotRight)
+
+// رسم سقف‌ها و کف‌ها برای تحلیل پرایس اکشن (BOS / CHOCH)
+plotshape(ph, style=shape.triangledown, color=color.new(color.red, 50), location=location.abovebar, size=size.small, title="Swing High", offset=-pivotRight)
+plotshape(pl, style=shape.triangleup, color=color.new(color.green, 50), location=location.belowbar, size=size.small, title="Swing Low", offset=-pivotRight)
+
+// --- 5. Entry & Exit Logic (Spot Strategy) ---
+// شرط اول: تغییر فاز سوپرترند به صعودی
+bullishFlip = ta.change(direction) < 0
+// شرط دوم: قیمت بالای EMA 50 باشد (تایید روند صعودی)
+aboveEMA = close > ema50
+// شرط سوم: پرهیز از خرید در اوج پمپ و هیجان بازار
+rsiValid = rsi < rsiOverbought
+
+longCondition = bullishFlip and aboveEMA and rsiValid
+
+// خروج از معامله اسپات: تغییر فاز سوپرترند به نزولی
+exitCondition = ta.change(direction) > 0
+
+if (longCondition)
+    strategy.entry("Spot Buy", strategy.long)
+
+if (exitCondition)
+    strategy.close("Spot Buy", comment="Trend Reversed")
