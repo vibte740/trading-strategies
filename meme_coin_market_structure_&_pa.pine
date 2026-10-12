@@ -1,57 +1,161 @@
 //@version=6
-strategy("Meme Coin Market Structure & PA", overlay=true, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.1)
+strategy("Meme Coin Market Structure & PA v2",
+     overlay=true,
+     initial_capital=1000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     pyramiding=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=5,
+     calc_on_every_tick=false)
 
-// --- 1. Moving Averages (Trend Filter) ---
-ema50Length = input.int(50, title="EMA 50 Length", group="Trend Filters")
-ema200Length = input.int(200, title="EMA 200 Length", group="Trend Filters")
-ema50 = ta.ema(close, ema50Length)
+// =====================================================================
+// INPUTS
+// =====================================================================
+// Trend
+ema50Length  = input.int(50,  "EMA fast length", group="Trend Filters")
+ema200Length = input.int(200, "EMA slow length", group="Trend Filters")
+useEma200    = input.bool(false, "Require close > EMA slow", group="Trend Filters", tooltip="Off by default: new meme coins often have < 200 bars of history.")
+useHTF       = input.bool(true,  "Higher-timeframe trend filter", group="Trend Filters")
+htfTf        = input.timeframe("240", "HTF", group="Trend Filters")
+htfEmaLen    = input.int(50, "HTF EMA length", group="Trend Filters")
+
+// Supertrend
+atrPeriod = input.int(10, "Supertrend ATR length", group="Supertrend")
+factor    = input.float(3.0, "Supertrend factor", step=0.1, group="Supertrend")
+
+// Momentum / quality filters
+rsiLength = input.int(14, "RSI length", group="Filters")
+rsiMin    = input.int(45, "RSI minimum (momentum)", group="Filters")
+rsiMax    = input.int(72, "RSI maximum (anti-FOMO)", group="Filters")
+adxLen    = input.int(14, "ADX length", group="Filters")
+adxMin    = input.float(20.0, "ADX minimum (skip chop)", group="Filters")
+volLen    = input.int(20, "Volume MA length", group="Filters")
+volMult   = input.float(1.0, "Min volume vs MA", step=0.1, group="Filters")
+maxExtATR = input.float(4.0, "Max distance above EMA fast (in ATRs)", step=0.5, group="Filters", tooltip="Avoids buying a vertical pump far from the mean.")
+
+// Market structure
+pivotLeft  = input.int(5, "Pivot left bars",  group="Market Structure")
+pivotRight = input.int(5, "Pivot right bars", group="Market Structure")
+
+// Entries
+useFlip = input.bool(true, "Entry: Supertrend flip", group="Entries")
+useBOS  = input.bool(true, "Entry: break of last swing high (with higher low)", group="Entries")
+
+// Risk
+riskPct      = input.float(2.0, "Risk per trade (% of equity)", step=0.25, group="Risk")
+initStopATR  = input.float(2.5, "Initial stop (ATR)", step=0.25, group="Risk")
+trailATR     = input.float(3.0, "Trailing stop from highest high (ATR)", step=0.25, group="Risk")
+useTP1       = input.bool(true, "Take partial profit", group="Risk")
+tp1ATR       = input.float(3.0, "Partial TP distance (ATR)", step=0.25, group="Risk")
+tp1Pct       = input.float(50.0, "Partial TP size (%)", group="Risk")
+cooldownBars = input.int(5, "Cooldown bars after any exit", group="Risk")
+
+// =====================================================================
+// INDICATORS
+// =====================================================================
+ema50  = ta.ema(close, ema50Length)
 ema200 = ta.ema(close, ema200Length)
+atrV   = ta.atr(atrPeriod)
+rsi    = ta.rsi(close, rsiLength)
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+volMA  = ta.sma(volume, volLen)
 
-plot(ema50, color=color.new(color.blue, 0), title="EMA 50", linewidth=2)
-plot(ema200, color=color.new(color.white, 0), title="EMA 200", linewidth=2)
-
-// --- 2. Supertrend (Volatility Trend) ---
-atrPeriod = input.int(10, title="Supertrend ATR Length", group="Supertrend")
-factor = input.float(3.0, title="Supertrend Factor", group="Supertrend")
 [supertrend, direction] = ta.supertrend(factor, atrPeriod)
+stBull = direction < 0
 
-upTrend = direction < 0 ? supertrend : na
-downTrend = direction > 0 ? supertrend : na
+// Non-repainting HTF trend (previous completed HTF bar only)
+htfUp = request.security(syminfo.tickerid, htfTf, close[1] > ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_on)
 
-plot(upTrend, color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2, title="Up Trend")
-plot(downTrend, color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2, title="Down Trend")
-
-// --- 3. RSI (Momentum / Overbought Filter) ---
-rsiLength = input.int(14, title="RSI Length", group="Momentum")
-rsiOverbought = input.int(75, title="RSI Overbought Level", group="Momentum")
-rsi = ta.rsi(close, rsiLength)
-
-// --- 4. Market Structure (Pivot Points for PA) ---
-pivotLeft = input.int(5, title="Pivot Left Bars", group="Market Structure")
-pivotRight = input.int(5, title="Pivot Right Bars", group="Market Structure")
-
+// =====================================================================
+// MARKET STRUCTURE
+// =====================================================================
 ph = ta.pivothigh(high, pivotLeft, pivotRight)
-pl = ta.pivotlow(low, pivotLeft, pivotRight)
+pl = ta.pivotlow(low,  pivotLeft, pivotRight)
 
-// رسم سقف‌ها و کف‌ها برای تحلیل پرایس اکشن (BOS / CHOCH)
-plotshape(ph, style=shape.triangledown, color=color.new(color.red, 50), location=location.abovebar, size=size.small, title="Swing High", offset=-pivotRight)
-plotshape(pl, style=shape.triangleup, color=color.new(color.green, 50), location=location.belowbar, size=size.small, title="Swing Low", offset=-pivotRight)
+var float lastSwingHigh = na
+var float lastPL = na
+var float prevPL = na
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
 
-// --- 5. Entry & Exit Logic (Spot Strategy) ---
-// شرط اول: تغییر فاز سوپرترند به صعودی
+higherLow = lastPL > prevPL      // false while either value is na
+bos       = ta.crossover(close, lastSwingHigh)
+
+// =====================================================================
+// ENTRY / EXIT CONDITIONS
+// =====================================================================
+var int lastExitBar = na
+if ta.change(strategy.closedtrades) > 0
+    lastExitBar := bar_index
+cooldownOK = na(lastExitBar) or (bar_index - lastExitBar > cooldownBars)
+
+trendOK    = close > ema50 and (not useEma200 or close > ema200) and (not useHTF or htfUp)
+momentumOK = rsi > rsiMin and rsi < rsiMax and adx > adxMin and diPlus > diMinus
+volumeOK   = volume > volMA * volMult
+notExtended = (close - ema50) < maxExtATR * atrV
+
+filtersOK = trendOK and momentumOK and volumeOK and notExtended and cooldownOK
+
 bullishFlip = ta.change(direction) < 0
-// شرط دوم: قیمت بالای EMA 50 باشد (تایید روند صعودی)
-aboveEMA = close > ema50
-// شرط سوم: پرهیز از خرید در اوج پمپ و هیجان بازار
-rsiValid = rsi < rsiOverbought
+flipSignal  = useFlip and bullishFlip
+bosSignal   = useBOS and stBull and bos and higherLow
 
-longCondition = bullishFlip and aboveEMA and rsiValid
+longCondition = (flipSignal or bosSignal) and filtersOK
+exitFlip      = ta.change(direction) > 0
 
-// خروج از معامله اسپات: تغییر فاز سوپرترند به نزولی
-exitCondition = ta.change(direction) > 0
+// =====================================================================
+// ORDERS & RISK MANAGEMENT
+// =====================================================================
+stopDist = atrV * initStopATR
+riskQty  = (strategy.equity * riskPct / 100) / stopDist
+maxQty   = strategy.equity / close            // spot: no leverage
+posQty   = math.min(riskQty, maxQty)
 
-if (longCondition)
-    strategy.entry("Spot Buy", strategy.long)
+if longCondition and strategy.position_size == 0
+    strategy.entry("Spot Buy", strategy.long, qty=posQty)
 
-if (exitCondition)
-    strategy.close("Spot Buy", comment="Trend Reversed")
+var float highestSinceEntry = na
+var float trailStop = na
+
+if strategy.position_size > 0
+    highestSinceEntry := na(highestSinceEntry) ? high : math.max(highestSinceEntry, high)
+    float initStop = strategy.position_avg_price - stopDist
+    trailStop := math.max(nz(trailStop, initStop), highestSinceEntry - atrV * trailATR, initStop)
+
+    strategy.exit("Trail", "Spot Buy", stop=trailStop)
+    if useTP1
+        strategy.exit("TP1", "Spot Buy", qty_percent=tp1Pct, limit=strategy.position_avg_price + atrV * tp1ATR)
+    if exitFlip
+        strategy.close("Spot Buy", comment="Trend Reversed")
+else
+    highestSinceEntry := na
+    trailStop := na
+
+// =====================================================================
+// PLOTS
+// =====================================================================
+plot(ema50,  "EMA fast", color=color.new(color.blue, 0), linewidth=2)
+plot(ema200, "EMA slow", color=color.new(color.gray, 0), linewidth=2)
+
+plot(stBull ? supertrend : na, "Up Trend",   color=color.green, style=plot.style_linebr, linewidth=2)
+plot(not stBull ? supertrend : na, "Down Trend", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// v6: plotshape needs a bool series, not the raw float pivot value
+plotshape(not na(ph), "Swing High", style=shape.triangledown, color=color.new(color.red, 50),
+     location=location.abovebar, size=size.small, offset=-pivotRight)
+plotshape(not na(pl), "Swing Low", style=shape.triangleup, color=color.new(color.green, 50),
+     location=location.belowbar, size=size.small, offset=-pivotRight)
+
+plot(strategy.position_size > 0 ? trailStop : na, "Trailing stop", color=color.orange, style=plot.style_linebr)
+plot(lastSwingHigh, "Last swing high", color=color.new(color.red, 70), style=plot.style_stepline)
+
+plotshape(longCondition, "Long signal", style=shape.labelup, location=location.belowbar,
+     color=color.green, textcolor=color.white, text="BUY", size=size.tiny)
+
+alertcondition(longCondition, "Long signal", "Meme PA v2: long setup on {{ticker}}")
+alertcondition(exitFlip, "Trend reversed", "Meme PA v2: Supertrend flipped bearish on {{ticker}}")
