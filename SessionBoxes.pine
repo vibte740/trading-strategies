@@ -1,99 +1,48 @@
 //@version=6
 indicator("Session Boxes (UTC)", overlay=true, max_boxes_count=500, max_labels_count=500)
 
-// ── Core sessions ───────────────────────────────────────────────────────
-var g1 = "ASIA (main)"
-showASIA = input.bool(true, "Show", group=g1)
-sessASIA = input.session("0000-0700", "Session (UTC)", group=g1)
-colASIA  = input.color(color.new(color.gray, 0), "Color", group=g1)
+// ── Sessions ────────────────────────────────────────────────────────────
+var g1 = "AUS (Australia)"
+showAUS = input.bool(true, "Show", group=g1)
+sessAUS = input.session("2300-0600", "Session (UTC)", group=g1)
+colAUS  = input.color(color.new(color.silver, 0), "Color", group=g1)
+styAUS  = input.string("Dotted", "Border style", options=["Solid", "Dashed", "Dotted"], group=g1)
 
-var g2 = "LDN"
-showLdn = input.bool(true, "Show", group=g2)
-sessLdn = input.session("0700-1000", "Session (UTC)", group=g2)
-colLdn  = input.color(color.new(color.blue, 0), "Color", group=g2)
+var g2 = "JPN (Japan)"
+showJPN = input.bool(true, "Show", group=g2)
+sessJPN = input.session("0000-0630", "Session (UTC)", group=g2)
+colJPN  = input.color(color.new(color.red, 0), "Color", group=g2)
+styJPN  = input.string("Dashed", "Border style", options=["Solid", "Dashed", "Dotted"], group=g2)
 
-var g3 = "NY AM"
-showNyAm = input.bool(true, "Show", group=g3)
-sessNyAm = input.session("1200-1500", "Session (UTC)", group=g3)
-colNyAm  = input.color(color.new(color.orange, 0), "Color", group=g3)
+var g3 = "CHN (China)"
+showCHN = input.bool(true, "Show", group=g3)
+sessCHN = input.session("0130-0700", "Session (UTC)", group=g3)
+colCHN  = input.color(color.new(color.maroon, 0), "Color", group=g3)
+styCHN  = input.string("Solid", "Border style", options=["Solid", "Dashed", "Dotted"], group=g3)
 
-var g4 = "LC (London close)"
-showLc = input.bool(true, "Show", group=g4)
-sessLc = input.session("1500-1700", "Session (UTC)", group=g4)
-colLc  = input.color(color.new(color.purple, 0), "Color", group=g4)
+var g4 = "UK"
+showUK = input.bool(true, "Show", group=g4)
+sessUK = input.session("0700-1600", "Session (UTC)", group=g4)
+colUK  = input.color(color.new(color.blue, 0), "Color", group=g4)
+styUK  = input.string("Dashed", "Border style", options=["Solid", "Dashed", "Dotted"], group=g4)
 
-var g5 = "NY PM"
-showNyPm = input.bool(true, "Show", group=g5)
-sessNyPm = input.session("1830-2100", "Session (UTC)", group=g5)
-colNyPm  = input.color(color.new(color.teal, 0), "Color", group=g5)
-
-// ── Asia detail ─────────────────────────────────────────────────────────
-var a1 = "SYD"
-showSyd = input.bool(true, "Show", group=a1)
-sessSyd = input.session("2300-0600", "Session (UTC)", group=a1)
-colSyd  = input.color(color.new(color.silver, 0), "Color", group=a1)
-
-var a2 = "TKY"
-showTky = input.bool(true, "Show", group=a2)
-sessTky = input.session("0000-0630", "Session (UTC)", group=a2)
-colTky  = input.color(color.new(color.red, 0), "Color", group=a2)
-
-var a3 = "CN"
-showCn = input.bool(true, "Show", group=a3)
-sessCn = input.session("0130-0700", "Session (UTC)", group=a3)
-colCn  = input.color(color.new(color.maroon, 0), "Color", group=a3)
-
-var a4 = "HK"
-showHk = input.bool(true, "Show", group=a4)
-sessHk = input.session("0130-0800", "Session (UTC)", group=a4)
-colHk  = input.color(color.new(color.fuchsia, 0), "Color", group=a4)
-
-var a5 = "MY"
-showMy = input.bool(true, "Show", group=a5)
-sessMy = input.session("0100-0900", "Session (UTC)", group=a5)
-colMy  = input.color(color.new(color.green, 0), "Color", group=a5)
-
-var a6 = "IN"
-showIn = input.bool(true, "Show", group=a6)
-sessIn = input.session("0345-1000", "Session (UTC)", group=a6)
-colIn  = input.color(color.new(color.lime, 0), "Color", group=a6)
-
-// ── Overlaps & gaps ─────────────────────────────────────────────────────
-var o1 = "AS/LD (overlap)"
-showAsLd = input.bool(true, "Show", group=o1)
-sessAsLd = input.session("0700-0900", "Session (UTC)", group=o1)
-colAsLd  = input.color(color.new(color.yellow, 0), "Color", group=o1)
-
-var o2 = "LD/NY (overlap)"
-showLdNy = input.bool(true, "Show", group=o2)
-sessLdNy = input.session("1200-1600", "Session (UTC)", group=o2)
-colLdNy  = input.color(color.new(color.aqua, 0), "Color", group=o2)
-
-var o3 = "LCH (London lunch)"
-showLch = input.bool(false, "Show", group=o3)
-sessLch = input.session("1000-1200", "Session (UTC)", group=o3)
-colLch  = input.color(color.new(color.gray, 30), "Color", group=o3)
-
-var o4 = "GAP (LC to NY PM)"
-showGap = input.bool(false, "Show", group=o4)
-sessGap = input.session("1700-1830", "Session (UTC)", group=o4)
-colGap  = input.color(color.new(color.gray, 30), "Color", group=o4)
-
-var o5 = "RLL (rollover)"
-showRll = input.bool(false, "Show", group=o5)
-sessRll = input.session("2100-0000", "Session (UTC)", group=o5)
-colRll  = input.color(color.new(color.gray, 30), "Color", group=o5)
+var g5 = "USA"
+showUSA = input.bool(true, "Show", group=g5)
+sessUSA = input.session("1200-2100", "Session (UTC)", group=g5)
+colUSA  = input.color(color.new(color.orange, 0), "Color", group=g5)
+styUSA  = input.string("Solid", "Border style", options=["Solid", "Dashed", "Dotted"], group=g5)
 
 // ── Style ───────────────────────────────────────────────────────────────
 var gs = "Style"
 fillTransp = input.int(92, "Fill transparency", minval=0, maxval=100, group=gs)
 borderW    = input.int(1, "Border width", minval=1, maxval=4, group=gs)
-showRole   = input.bool(false, "Append role to label", group=gs)
 txtSize    = input.string("small", "Label size", options=["tiny", "small", "normal", "large"], group=gs)
-lblGap     = input.int(4, "Label spacing (bars) between same-start sessions", minval=0, maxval=50, group=gs)
 
-// ── Session box: live high/low range, label shifted right by slot ───────
-drawSession(string sess, string name, color col, bool enabled, int slot) =>
+// ── Session box: live high/low range with label on top ──────────────────
+toStyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+drawSession(string sess, string name, color col, bool enabled, string sty) =>
     var box   bx = na
     var label lb = na
     var float hi = na
@@ -106,8 +55,8 @@ drawSession(string sess, string name, color col, bool enabled, int slot) =>
         hi := high
         lo := low
         bx := box.new(bar_index, hi, bar_index, lo, border_color=col, border_width=borderW,
-                      bgcolor=color.new(col, fillTransp))
-        lb := label.new(bar_index + slot * lblGap, hi, name, style=label.style_label_lower_left,
+                      border_style=toStyle(sty), bgcolor=color.new(col, fillTransp))
+        lb := label.new(bar_index, hi, name, style=label.style_label_lower_left,
                         color=na, textcolor=col, size=txtSize)
     else if inSess
         hi := math.max(hi, high)
@@ -122,29 +71,8 @@ drawSession(string sess, string name, color col, bool enabled, int slot) =>
 if timeframe.isdwm
     runtime.error("Use an intraday timeframe (e.g. 1m–1h) for session boxes.")
 
-roleBuild = showRole ? " · build" : ""
-roleTrade = showRole ? " · trade" : ""
-roleOpt   = showRole ? " · opt"   : ""
-
-// Slot = position in the row of labels that share a start time
-// Core
-drawSession(sessASIA, "ASIA" + roleBuild,    colASIA, showASIA, 0)  // 0000
-drawSession(sessLdn,  "LDN" + roleTrade,     colLdn,  showLdn,  0)  // 0700
-drawSession(sessNyAm, "NY AM ⭐️" + roleTrade, colNyAm, showNyAm, 0)  // 1200
-drawSession(sessLc,   "LC" + roleOpt,        colLc,   showLc,   0)  // 1500
-drawSession(sessNyPm, "NY PM" + roleOpt,     colNyPm, showNyPm, 0)  // 1830
-
-// Asia detail
-drawSession(sessSyd, "SYD", colSyd, showSyd, 0)  // 2300
-drawSession(sessTky, "TKY", colTky, showTky, 1)  // 0000 (with ASIA)
-drawSession(sessCn,  "CN",  colCn,  showCn,  0)  // 0130
-drawSession(sessHk,  "HK",  colHk,  showHk,  1)  // 0130 (with CN)
-drawSession(sessMy,  "MY",  colMy,  showMy,  0)  // 0100
-drawSession(sessIn,  "IN",  colIn,  showIn,  0)  // 0345
-
-// Overlaps & gaps
-drawSession(sessAsLd, "AS/LD", colAsLd, showAsLd, 1)  // 0700 (with LDN)
-drawSession(sessLdNy, "LD/NY", colLdNy, showLdNy, 1)  // 1200 (with NY AM)
-drawSession(sessLch,  "LCH",   colLch,  showLch,  0)
-drawSession(sessGap,  "GAP",   colGap,  showGap,  0)
-drawSession(sessRll,  "RLL",   colRll,  showRll,  0)
+drawSession(sessAUS, "AUS", colAUS, showAUS, styAUS)  // 2300
+drawSession(sessJPN, "JPN", colJPN, showJPN, styJPN)  // 0000
+drawSession(sessCHN, "CHN", colCHN, showCHN, styCHN)  // 0130
+drawSession(sessUK,  "UK",  colUK,  showUK,  styUK)   // 0700
+drawSession(sessUSA, "USA", colUSA, showUSA, styUSA)  // 1200
