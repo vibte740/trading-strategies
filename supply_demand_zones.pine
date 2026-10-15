@@ -1,0 +1,143 @@
+//@version=6
+indicator("Supply Demand Zones", overlay = true, max_boxes_count = 500, max_labels_count = 500)
+
+// Strong HIGH = swing high + drop of at least minStrength x ATR within lookahead bars -> SUPPLY zone
+// Strong LOW  = swing low  + rally of at least minStrength x ATR within lookahead bars -> DEMAND zone
+// A zone is broken once a candle CLOSES through it.
+
+// ----------------------------- Inputs --------------------------------------
+int   swingLeft    = input.int(5, "Swing bars left", minval = 1)
+int   swingRight   = input.int(5, "Swing bars right", minval = 1)
+int   lookahead    = input.int(10, "Lookahead bars", minval = 1)
+float minStrength  = input.float(2.0, "Min strength (x ATR)", minval = 0.1, step = 0.1)
+int   atrPeriod    = input.int(14, "ATR period", minval = 1)
+float minThickness = input.float(0.25, "Min zone thickness (x ATR)", minval = 0.0, step = 0.05)
+bool  showBroken   = input.bool(false, "Show broken zones")
+bool  showLabels   = input.bool(true, "Show strength labels")
+int   maxZones     = input.int(60, "Max zones kept", minval = 1, maxval = 250)
+color supplyColor  = input.color(#ef5350, "Supply color")
+color demandColor  = input.color(#26a69a, "Demand color")
+
+// ----------------------------- Storage -------------------------------------
+var array<box>   boxes     = array.new<box>()
+var array<label> labelsArr = array.new<label>()
+var array<int>   kinds     = array.new<int>()
+var array<float> tops      = array.new<float>()
+var array<float> bottoms   = array.new<float>()
+var array<bool>  brokenArr = array.new<bool>()
+
+// ----------------------------- Series --------------------------------------
+// Zones are confirmed k bars after the swing candle (needs `right` and `lookahead` bars after it).
+int k = math.max(swingRight, lookahead)
+
+float a            = ta.atr(atrPeriod)
+float swingHighWin = ta.highest(high, swingLeft + swingRight + 1)
+float swingLowWin  = ta.lowest(low, swingLeft + swingRight + 1)
+float minLowAfter  = ta.lowest(low, lookahead)
+float maxHighAfter = ta.highest(high, lookahead)
+
+// ----------------------------- Update existing zones -----------------------
+int n = array.size(boxes)
+if n > 0
+    for idx = n - 1 to 0
+        int   kd = array.get(kinds, idx)
+        float tp = array.get(tops, idx)
+        float bt = array.get(bottoms, idx)
+        bool  isBroken = array.get(brokenArr, idx)
+        box   bx = array.get(boxes, idx)
+        if not isBroken
+            bool crossed = kd == 1 ? close > tp : close < bt
+            if crossed
+                if showBroken
+                    array.set(brokenArr, idx, true)
+                    box.set_right(bx, bar_index)
+                    box.set_border_style(bx, line.style_dashed)
+                    box.set_bgcolor(bx, color.new(kd == 1 ? supplyColor : demandColor, 88))
+                else
+                    box.delete(bx)
+                    label lbx = array.get(labelsArr, idx)
+                    if not na(lbx)
+                        label.delete(lbx)
+                    array.remove(boxes, idx)
+                    array.remove(labelsArr, idx)
+                    array.remove(kinds, idx)
+                    array.remove(tops, idx)
+                    array.remove(bottoms, idx)
+                    array.remove(brokenArr, idx)
+            else
+                box.set_right(bx, bar_index)
+
+// ----------------------------- Detect new zones ----------------------------
+if bar_index >= k + swingLeft and not na(a[k]) and a[k] > 0
+    float ai  = a[k]
+    float hiK = high[k]
+    float loK = low[k]
+    float opK = open[k]
+    float clK = close[k]
+
+    // ---- strong high -> supply ----
+    if hiK == swingHighWin[k - swingRight]
+        float strengthS = (hiK - minLowAfter[k - lookahead]) / ai
+        if strengthS >= minStrength
+            float topS = hiK
+            float botS = math.max(opK, clK)
+            if topS - botS < minThickness * ai
+                botS := topS - minThickness * ai
+            bool brokenS = false
+            int  brokenOffS = 0
+            for o = k - 1 to 0
+                if close[o] > topS
+                    brokenS := true
+                    brokenOffS := o
+                    break
+            if not brokenS or showBroken
+                int rightS = brokenS ? bar_index - brokenOffS : bar_index
+                box bxS = box.new(bar_index - k, topS, rightS, botS, border_color = supplyColor, bgcolor = color.new(supplyColor, brokenS ? 88 : 72), border_style = brokenS ? line.style_dashed : line.style_solid)
+                label lbS = na
+                if showLabels
+                    lbS := label.new(bar_index - k, topS, "SUPPLY " + str.tostring(strengthS, "#.#") + "xATR", style = label.style_label_down, color = color.new(supplyColor, 100), textcolor = supplyColor, size = size.tiny)
+                array.push(boxes, bxS)
+                array.push(labelsArr, lbS)
+                array.push(kinds, 1)
+                array.push(tops, topS)
+                array.push(bottoms, botS)
+                array.push(brokenArr, brokenS)
+
+    // ---- strong low -> demand ----
+    if loK == swingLowWin[k - swingRight]
+        float strengthD = (maxHighAfter[k - lookahead] - loK) / ai
+        if strengthD >= minStrength
+            float botD = loK
+            float topD = math.min(opK, clK)
+            if topD - botD < minThickness * ai
+                topD := botD + minThickness * ai
+            bool brokenD = false
+            int  brokenOffD = 0
+            for o = k - 1 to 0
+                if close[o] < botD
+                    brokenD := true
+                    brokenOffD := o
+                    break
+            if not brokenD or showBroken
+                int rightD = brokenD ? bar_index - brokenOffD : bar_index
+                box bxD = box.new(bar_index - k, topD, rightD, botD, border_color = demandColor, bgcolor = color.new(demandColor, brokenD ? 88 : 72), border_style = brokenD ? line.style_dashed : line.style_solid)
+                label lbD = na
+                if showLabels
+                    lbD := label.new(bar_index - k, botD, "DEMAND " + str.tostring(strengthD, "#.#") + "xATR", style = label.style_label_up, color = color.new(demandColor, 100), textcolor = demandColor, size = size.tiny)
+                array.push(boxes, bxD)
+                array.push(labelsArr, lbD)
+                array.push(kinds, -1)
+                array.push(tops, topD)
+                array.push(bottoms, botD)
+                array.push(brokenArr, brokenD)
+
+// ----------------------------- Cap zone count ------------------------------
+while array.size(boxes) > maxZones
+    box.delete(array.shift(boxes))
+    label lbOld = array.shift(labelsArr)
+    if not na(lbOld)
+        label.delete(lbOld)
+    array.shift(kinds)
+    array.shift(tops)
+    array.shift(bottoms)
+    array.shift(brokenArr)
