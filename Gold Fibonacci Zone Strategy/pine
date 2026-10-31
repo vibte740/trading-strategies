@@ -1,0 +1,109 @@
+//@version=5
+strategy("Gold Fibonacci Zone Strategy [Consolidated]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, slippage=2)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+lookbackPeriod = input.int(50, "Lookback Period", minval=10, maxval=200)
+
+// Fib Levels
+fib_500 = input.float(0.500, "Fib 50.0% Level")
+fib_618 = input.float(0.618, "Fib 61.8% Level")
+
+// Risk Management
+stopLossPercent = input.float(2.0, "Stop Loss %", step=0.1, minval=0.1)
+takeProfitPercent = input.float(3.0, "Take Profit %", step=0.1, minval=0.1)
+riskRewardRatio = input.float(1.5, "Min Risk/Reward Ratio", step=0.1, minval=1.0)
+
+// Filters
+useVolumeFilter = input.bool(true, "Use Volume Filter")
+volumeThreshold = input.float(1.2, "Volume Threshold Multiplier", step=0.1, minval=1.0)
+useMomentumFilter = input.bool(true, "Use Momentum Filter")
+rsiLength = input.int(14, "RSI Length", minval=5, maxval=30)
+rsiOverbought = input.int(60, "RSI Overbought Level", minval=50, maxval=80)
+
+// =============================================================================
+// CALCULATIONS
+// =============================================================================
+
+// 1. Swing Highs/Lows
+swingHigh = ta.pivothigh(high, lookbackPeriod, lookbackPeriod)
+swingLow = ta.pivotlow(low, lookbackPeriod, lookbackPeriod)
+
+var float recentSwingHigh = na
+var float recentSwingLow = na
+
+if not na(swingHigh)
+    recentSwingHigh := swingHigh
+
+if not na(swingLow)
+    recentSwingLow := swingLow
+
+// 2. Fibonacci Levels
+fibRange = recentSwingHigh - recentSwingLow
+fibLevel_50 = recentSwingHigh - (fibRange * fib_500)
+fibLevel_618 = recentSwingHigh - (fibRange * fib_618)
+
+// 3. Zone Checks
+inMidFibZone = (close >= fibLevel_618) and (close <= fibLevel_50)
+belowResistance = close < recentSwingHigh
+
+// 4. Rejection & Momentum
+upperWick = high - math.max(open, close)
+bodySize = math.abs(open - close)
+hasRejectionWick = upperWick > (bodySize * 1.5) and upperWick > (math.min(open, close) - low)
+smallBody = bodySize < (ta.sma(bodySize, 20) * 0.5)
+weakMomentum = smallBody or hasRejectionWick
+
+// 5. Volume Filter
+avgVolume = ta.sma(volume, 20)
+volumeConfirmed = useVolumeFilter ? (volume > avgVolume * volumeThreshold) : true
+
+// 6. RSI Filter
+rsi = ta.rsi(close, rsiLength)
+momentumConfirmed = useMomentumFilter ? (rsi < rsiOverbought) : true
+
+// 7. Risk/Reward Calculation
+stopLossPrice = recentSwingHigh * (1 + stopLossPercent / 100)
+takeProfitPrice = close * (1 - takeProfitPercent / 100)
+riskAmount = stopLossPrice - close
+rewardAmount = close - takeProfitPrice
+riskRewardCalculated = riskAmount != 0 ? rewardAmount / riskAmount : 0
+validRiskReward = riskRewardCalculated >= riskRewardRatio
+
+// =============================================================================
+// STRATEGY LOGIC
+// =============================================================================
+
+// Combine all conditions
+// Using a single-line assignment with logical operators avoids line-continuation errors
+shortCondition = inMidFibZone and 
+                 belowResistance and 
+                 weakMomentum and 
+                 volumeConfirmed and 
+                 momentumConfirmed and 
+                 validRiskReward and 
+                 not na(recentSwingHigh) and 
+                 not na(recentSwingLow)
+
+// Execution
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, comment="Sell @ Mid-Fib")
+    strategy.exit("Exit Short", from_entry="Short", stop=stopLossPrice, limit=takeProfitPrice, comment_loss="SL", comment_profit="TP")
+
+// Cancel pending exits if no position exists
+if strategy.position_size == 0
+    strategy.cancel("Exit Short")
+
+// =============================================================================
+// PLOTTING & ALERTS
+// =============================================================================
+
+plot(fibLevel_50, "Fib 50%", color=color.green, linewidth=2, style=plot.style_circles)
+plot(fibLevel_618, "Fib 61.8%", color=color.green, linewidth=2, style=plot.style_circles)
+plot(recentSwingHigh, "Resistance", color=color.red, linewidth=2, style=plot.style_line)
+
+bgcolor(inMidFibZone and belowResistance ? color.new(color.orange, 90) : na)
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color=color.red, size=size.small)
+
+alertcondition(shortCondition, title="Short Setup Alert", message="Gold: Short setup detected")
