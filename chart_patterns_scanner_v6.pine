@@ -39,22 +39,22 @@ enCH   = input.bool(true,  "Cup and Handle",              group = grpCH)
 enICH  = input.bool(true,  "Inverted Cup and Handle",     group = grpCH)
 
 // Sensitivity
-swingLen   = input.int(5,   "Swing Length (pivot bars)",   minval = 3, maxval = 20, group = "Sensitivity")
-tolPct     = input.float(0.5, "Level Match Tolerance %",   minval = 0.1, maxval = 5.0, step = 0.1, group = "Sensitivity")
-minBars    = input.int(10,  "Min Pattern Length (bars)",   minval = 5,  maxval = 100, group = "Sensitivity")
-maxBars    = input.int(60,  "Max Pattern Length (bars)",   minval = 20, maxval = 300, group = "Sensitivity")
+swingLen = input.int(5,   "Swing Length (pivot bars)",       minval = 3, maxval = 20,  group = "Sensitivity")
+tolPct   = input.float(0.5, "Level Match Tolerance %",       minval = 0.1, maxval = 5.0, step = 0.1, group = "Sensitivity")
+minBars  = input.int(10,  "Min Pattern Length (bars)",       minval = 5, maxval = 100, group = "Sensitivity")
+maxBars  = input.int(60,  "Max Pattern Length (bars)",       minval = 20, maxval = 300, group = "Sensitivity")
 
 // ───────────────────────── CONSTANTS ─────────────────────────
-var COL_BULL = color.new(#26a69a, 0)
-var COL_BEAR = color.new(#ef5350, 0)
-var COL_TGT  = color.new(color.orange, 30)
-var COL_EDGE = color.new(color.gray, 40)
+var color COL_BULL = color.new(#26a69a, 0)
+var color COL_BEAR = color.new(#ef5350, 0)
+var color COL_TGT  = color.new(color.orange, 30)
+var color COL_EDGE = color.new(color.gray, 40)
 
 // Pattern status constants
-S_NONE      = 0
-S_AWAITING  = 1
-S_REACHED   = 2
-S_INPROG    = 3
+S_NONE     = 0
+S_AWAITING = 1
+S_REACHED  = 2
+S_INPROG   = 3
 
 // ───────────────────────── PIVOTS ─────────────────────────
 ph = ta.pivothigh(high, swingLen, swingLen)
@@ -105,11 +105,11 @@ f_showTarget(int status) =>
     else
         true
 
-f_drawBox(int x1, int y1, int x2, int y2, color col, bool extendRight) =>
+f_drawBox(int x1, float y1, int x2, float y2, color col, bool extendRight) =>
     b = box.new(x1, y1, x2, y2, border_color = col, border_width = 1, border_style = line.style_dashed, bgcolor = color.new(col, 92), extend = extendRight ? extend.right : extend.none)
     b
 
-f_drawLine(int x1, float y1, int x2, float y2, color col, style) =>
+f_drawLine(int x1, float y1, int x2, float y2, color col, string style) =>
     ln = line.new(x1, y1, x2, y2, color = col, width = 1, style = style)
     ln
 
@@ -137,11 +137,11 @@ f_isFlatLevel(float a, float b) =>
 
 // ─── Double Top / Double Bottom ───
 f_detectDoublePivot(bool findTop) =>
-    result = false
-    p1 = na
-    p2 = na
-    b1 = 0
-    b2 = 0
+    bool result = false
+    float p1 = na
+    float p2 = na
+    int b1 = 0
+    int b2 = 0
     if array.size(findTop ? pivHPrice : pivLPrice) >= 2
         p1 := array.get(findTop ? pivHPrice : pivLPrice, 1)
         p2 := array.get(findTop ? pivHPrice : pivLPrice, 0)
@@ -322,12 +322,12 @@ f_slopeFit(float y1, int x1, float y2, int x2, bool expectUp) =>
 
 // Rising Wedge: both highs and lows rising, highs rising slower (converging)
 if enRW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnRW < 10
-    h1 = array.get(pivHPrice, 1)
-    h2 = array.get(pivHPrice, 0)
+    h1  = array.get(pivHPrice, 1)
+    h2  = array.get(pivHPrice, 0)
     hb1 = array.get(pivHBar, 1)
     hb2 = array.get(pivHBar, 0)
-    l1 = array.get(pivLPrice, 1)
-    l2 = array.get(pivLPrice, 0)
+    l1  = array.get(pivLPrice, 1)
+    l2  = array.get(pivLPrice, 0)
     lb1 = array.get(pivLBar, 1)
     lb2 = array.get(pivLBar, 0)
     if hb2 > lb2 and f_slopeFit(h1, hb1, h2, hb2, true) and f_slopeFit(l1, lb1, l2, lb2, true)
@@ -347,12 +347,12 @@ if enRW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPr
 
 // Falling Wedge: both highs and lows falling, lows falling slower (converging)
 if enFW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnFW < 10
-    h1 = array.get(pivHPrice, 1)
-    h2 = array.get(pivHPrice, 0)
+    h1  = array.get(pivHPrice, 1)
+    h2  = array.get(pivHPrice, 0)
     hb1 = array.get(pivHBar, 1)
     hb2 = array.get(pivHBar, 0)
-    l1 = array.get(pivLPrice, 1)
-    l2 = array.get(pivLPrice, 0)
+    l1  = array.get(pivLPrice, 1)
+    l2  = array.get(pivLPrice, 0)
     lb1 = array.get(pivLBar, 1)
     lb2 = array.get(pivLBar, 0)
     if hb2 > lb2 and f_slopeFit(h1, hb1, h2, hb2, false) and f_slopeFit(l1, lb1, l2, lb2, false)
@@ -372,22 +372,20 @@ if enFW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPr
 
 // Triangle (symmetric / ascending / descending — simplified as converging non-parallel)
 if enTri and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnTri < 10
-    h1 = array.get(pivHPrice, 1)
-    h2 = array.get(pivHPrice, 0)
+    h1  = array.get(pivHPrice, 1)
+    h2  = array.get(pivHPrice, 0)
     hb1 = array.get(pivHBar, 1)
     hb2 = array.get(pivHBar, 0)
-    l1 = array.get(pivLPrice, 1)
-    l2 = array.get(pivLPrice, 0)
+    l1  = array.get(pivLPrice, 1)
+    l2  = array.get(pivLPrice, 0)
     lb1 = array.get(pivLBar, 1)
     lb2 = array.get(pivLBar, 0)
     if hb2 > lb2 and not f_isFlatLevel(h1, h2) and not f_isFlatLevel(l1, l2)
         hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
         lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
-        // Converging = slopes have opposite signs or magnitudes shrinking range
         range1 = h1 - l1
         range2 = h2 - l2
         if range2 < range1 * 0.85
-            // Determine breakout direction bias
             isBull = close > (h1 + l1) / 2
             mid = (h1 + h2 + l1 + l2) / 4
             target = isBull ? mid + range1 * 0.6 : mid - range1 * 0.6
@@ -404,12 +402,12 @@ if enTri and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLP
 
 // Rectangle (flat top and bottom, range-bound)
 if enRect and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnRect < 10
-    h1 = array.get(pivHPrice, 1)
-    h2 = array.get(pivHPrice, 0)
+    h1  = array.get(pivHPrice, 1)
+    h2  = array.get(pivHPrice, 0)
     hb1 = array.get(pivHBar, 1)
     hb2 = array.get(pivHBar, 0)
-    l1 = array.get(pivLPrice, 1)
-    l2 = array.get(pivLPrice, 0)
+    l1  = array.get(pivLPrice, 1)
+    l2  = array.get(pivLPrice, 0)
     lb1 = array.get(pivLBar, 1)
     lb2 = array.get(pivLBar, 0)
     if f_isFlatLevel(h1, h2) and f_isFlatLevel(l1, l2) and (h1 - l1) / l1 * 100.0 > tolPct
@@ -436,11 +434,9 @@ var int drawnEP = 0
 
 // Bullish Flag: sharp rise (pole), then small downward channel
 if enBF and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnBF < 10
-    // Look for a strong pole: big move up over last N bars
     lookback = math.min(30, bar_index)
     poleMove = (close - low[lookback]) / low[lookback] * 100.0
     if poleMove > tolPct * 2
-        // Flag channel: slight downward drift after the pole high
         h1 = array.get(pivHPrice, 0)
         l1 = array.get(pivLPrice, 0)
         hSlope = (h1 - array.get(pivHPrice, 1)) / math.max(array.get(pivHBar, 0) - array.get(pivHBar, 1), 1)
@@ -557,7 +553,6 @@ if enCH and barstate.islast and bar_index > maxBars and drawnCH < 10
     lookback = math.min(maxBars, bar_index - 1)
     cupHigh = high[lookback]
     cupHighBar = bar_index - lookback
-    // Find the lowest point in the middle of the range
     midStart = math.floor(lookback * 0.2)
     midEnd = math.floor(lookback * 0.8)
     cupLow = low[midEnd]
@@ -566,10 +561,8 @@ if enCH and barstate.islast and bar_index > maxBars and drawnCH < 10
         if low[i] < cupLow
             cupLow := low[i]
             cupLowBar := bar_index - i
-    // Recovery: recent price near or above cup rim
     rimDiff = math.abs(close - cupHigh) / cupHigh * 100.0
     depth = (cupHigh - cupLow) / cupHigh * 100.0
-    // Handle: small dip from recent high
     recentHigh = ta.highest(high, math.min(10, bar_index))
     handleDip = (recentHigh - close) / recentHigh * 100.0
     if depth > tolPct and cupLowBar > cupHighBar and rimDiff < tolPct * 3 and handleDip < depth * 0.5 and handleDip > 0
@@ -577,7 +570,6 @@ if enCH and barstate.islast and bar_index > maxBars and drawnCH < 10
         reached = f_checkReached(target, true)
         status = reached ? S_REACHED : S_AWAITING
         if f_showPattern(status)
-            // Draw cup arc approximation
             f_drawLine(cupHighBar, cupHigh, cupLowBar, cupLow, COL_BULL, line.style_solid)
             f_drawLine(cupLowBar, cupLow, bar_index - 1, cupHigh, COL_BULL, line.style_solid)
             f_drawLine(cupHighBar, cupHigh, bar_index + 5, cupHigh, COL_BULL, line.style_dashed)
@@ -600,7 +592,7 @@ if enICH and barstate.islast and bar_index > maxBars and drawnICH < 10
             cupHigh := high[i]
             cupHighBar := bar_index - i
     rimDiff = math.abs(close - cupLow) / cupLow * 100.0
-    depth = (cupHigh - cupLow) / cupLow * 100.0
+    depth = (cupHigh - cupLow) / cupHigh * 100.0
     recentLow = ta.lowest(low, math.min(10, bar_index))
     handlePop = (close - recentLow) / recentLow * 100.0
     if depth > tolPct and cupHighBar > cupLowBar and rimDiff < tolPct * 3 and handlePop < depth * 0.5 and handlePop > 0
@@ -623,7 +615,7 @@ if barstate.islast and patternsFilter != "Last Awaiting"
     table.cell(infoTable, 0, 0, "Pattern", text_color = color.white, text_size = size.small)
     table.cell(infoTable, 1, 0, "Count", text_color = color.white, text_size = size.small)
     patterns = array.from("Double Top", "Double Bottom", "Triple Top", "Triple Bottom", "H&S", "Inv H&S", "Rising Wedge", "Falling Wedge", "Triangle", "Rectangle", "Bull Flag", "Bear Flag", "Bull Pennant", "Bear Pennant", "Cup & Handle", "Inv Cup & Handle")
-    counts = array.from(drawnDT, drawnDB, drawnTT, drawnTB, drawnHS, drawnIHS, drawnRW, drawnFW, drawnTri, drawnRect, drawnBF, drawnEF, drawnBP, drawnEP, drawnCH, drawnICH)
+    counts   = array.from(drawnDT, drawnDB, drawnTT, drawnTB, drawnHS, drawnIHS, drawnRW, drawnFW, drawnTri, drawnRect, drawnBF, drawnEF, drawnBP, drawnEP, drawnCH, drawnICH)
     row = 1
     for i = 0 to array.size(patterns) - 1
         if array.get(counts, i) > 0
@@ -645,9 +637,7 @@ alertcondition(drawnBF > 0 and drawnBF[1] == 0, "Bull Flag Detected", "Bullish F
 alertcondition(drawnEF > 0 and drawnEF[1] == 0, "Bear Flag Detected", "Bearish Flag pattern detected")
 
 // ───────────────────────── IN-PROGRESS EMERGING MARKERS ─────────────────────────
-// Simple emerging pattern markers on recent bars
 if inProgress and barstate.islast
-    // Emerging double top: two similar recent highs
     if array.size(pivHPrice) >= 2
         p1 = array.get(pivHPrice, 1)
         p2 = array.get(pivHPrice, 0)
@@ -655,7 +645,6 @@ if inProgress and barstate.islast
         b2 = array.get(pivHBar, 0)
         if b2 > b1 and f_isFlatLevel(p1, p2) and bar_index - b2 < 10
             label.new(b2, p2, "DT?", style = label.style_label_down, color = color.new(COL_BEAR, 70), textcolor = COL_BEAR, size = size.tiny)
-    // Emerging double bottom
     if array.size(pivLPrice) >= 2
         p1 = array.get(pivLPrice, 1)
         p2 = array.get(pivLPrice, 0)
