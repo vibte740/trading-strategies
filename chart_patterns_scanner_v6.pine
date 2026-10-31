@@ -1,0 +1,667 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © vibte740
+// Chart Patterns Scanner v1.0 — Pine Script v6
+// Detects: Flags, Pennants, Double/Triple Top/Bottom, Head & Shoulders,
+// Inverse H&S, Wedges, Triangles, Rectangles, Cup & Handle, Inverted Cup & Handle.
+
+indicator("Chart Patterns Scanner [v6]", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ───────────────────────── INPUTS ─────────────────────────
+patternsFilter = input.string("All", "Patterns", options = ["All", "Awaiting and Reached", "Only Awaiting", "Last Awaiting"], group = "Display")
+targetsFilter  = input.string("All", "Price Targets", options = ["All", "Only Awaiting", "Awaiting and Reached", "None"], group = "Display")
+inProgress     = input.bool(true, "In Progress (search emerging patterns)", group = "Display")
+
+// Pattern enable toggles
+grpFlags = "Flags & Pennants"
+enBFlag  = input.bool(true,  "Bullish Flag",              group = grpFlags)
+enEFlag  = input.bool(true,  "Bearish Flag",              group = grpFlags)
+enBPenn  = input.bool(true,  "Bullish Pennant",           group = grpFlags)
+enEPenn  = input.bool(true,  "Bearish Pennant",           group = grpFlags)
+
+grpHT = "Head & Shoulders"
+enHS   = input.bool(true,  "Head And Shoulders",          group = grpHT)
+enIHS  = input.bool(true,  "Inverse Head And Shoulders",  group = grpHT)
+
+grpDT = "Double & Triple"
+enDT   = input.bool(true,  "Double Top",                  group = grpDT)
+enDB   = input.bool(true,  "Double Bottom",               group = grpDT)
+enTT   = input.bool(true,  "Triple Top",                  group = grpDT)
+enTB   = input.bool(true,  "Triple Bottom",               group = grpDT)
+
+grpWR = "Wedges & Triangles"
+enRW   = input.bool(true,  "Rising Wedge",                group = grpWR)
+enFW   = input.bool(true,  "Falling Wedge",               group = grpWR)
+enTri  = input.bool(true,  "Triangle",                    group = grpWR)
+enRect = input.bool(true,  "Rectangle",                   group = grpWR)
+
+grpCH = "Cup & Handle"
+enCH   = input.bool(true,  "Cup and Handle",              group = grpCH)
+enICH  = input.bool(true,  "Inverted Cup and Handle",     group = grpCH)
+
+// Sensitivity
+swingLen   = input.int(5,   "Swing Length (pivot bars)",   minval = 3, maxval = 20, group = "Sensitivity")
+tolPct     = input.float(0.5, "Level Match Tolerance %",   minval = 0.1, maxval = 5.0, step = 0.1, group = "Sensitivity")
+minBars    = input.int(10,  "Min Pattern Length (bars)",   minval = 5,  maxval = 100, group = "Sensitivity")
+maxBars    = input.int(60,  "Max Pattern Length (bars)",   minval = 20, maxval = 300, group = "Sensitivity")
+
+// ───────────────────────── CONSTANTS ─────────────────────────
+var COL_BULL = color.new(#26a69a, 0)
+var COL_BEAR = color.new(#ef5350, 0)
+var COL_TGT  = color.new(color.orange, 30)
+var COL_EDGE = color.new(color.gray, 40)
+
+// Pattern status constants
+S_NONE      = 0
+S_AWAITING  = 1
+S_REACHED   = 2
+S_INPROG    = 3
+
+// ───────────────────────── PIVOTS ─────────────────────────
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float[] pivHPrice = array.new_float(0)
+var int[]   pivHBar   = array.new_int(0)
+var float[] pivLPrice = array.new_float(0)
+var int[]   pivLBar   = array.new_int(0)
+
+if not na(ph)
+    array.unshift(pivHPrice, ph)
+    array.unshift(pivHBar, bar_index - swingLen)
+    if array.size(pivHPrice) > 50
+        array.pop(pivHPrice)
+        array.pop(pivHBar)
+
+if not na(pl)
+    array.unshift(pivLPrice, pl)
+    array.unshift(pivLBar, bar_index - swingLen)
+    if array.size(pivLPrice) > 50
+        array.pop(pivLPrice)
+        array.pop(pivLBar)
+
+// ───────────────────────── DRAWING HELPERS ─────────────────────────
+// Find the last matching pattern state for filtering
+var int lastPatternId = 0
+
+f_showPattern(int status) =>
+    if patternsFilter == "All"
+        true
+    else if patternsFilter == "Only Awaiting"
+        status == S_AWAITING or status == S_INPROG
+    else if patternsFilter == "Awaiting and Reached"
+        status == S_AWAITING or status == S_REACHED or status == S_INPROG
+    else if patternsFilter == "Last Awaiting"
+        status == S_AWAITING or status == S_INPROG
+    else
+        true
+
+f_showTarget(int status) =>
+    if targetsFilter == "None"
+        false
+    else if targetsFilter == "Only Awaiting"
+        status == S_AWAITING or status == S_INPROG
+    else if targetsFilter == "Awaiting and Reached"
+        true
+    else
+        true
+
+f_drawBox(int x1, int y1, int x2, int y2, color col, bool extendRight) =>
+    b = box.new(x1, y1, x2, y2, border_color = col, border_width = 1, border_style = line.style_dashed, bgcolor = color.new(col, 92), extend = extendRight ? extend.right : extend.none)
+    b
+
+f_drawLine(int x1, float y1, int x2, float y2, color col, style) =>
+    ln = line.new(x1, y1, x2, y2, color = col, width = 1, style = style)
+    ln
+
+f_drawTarget(float price, int fromBar, color col, string txt) =>
+    lbl = label.new(fromBar, price, txt, style = label.style_label_left, color = color.new(col, 80), textcolor = col, size = size.tiny)
+    ln = line.new(fromBar, price, bar_index + 10, price, color = col, width = 1, style = line.style_dotted)
+    [lbl, ln]
+
+f_patternLabel(int x, float y, string txt, bool isBull) =>
+    c = isBull ? COL_BULL : COL_BEAR
+    label.new(x, y, txt, style = isBull ? label.style_label_up : label.style_label_down, color = color.new(c, 70), textcolor = c, size = size.small)
+
+// Status of a completed pattern: did price reach the target?
+f_checkReached(float target, bool isBull) =>
+    if isBull
+        high >= target
+    else
+        low <= target
+
+// ───────────────────────── PATTERN DETECTORS ─────────────────────────
+
+// Helper: simple zigzag fit check
+f_isFlatLevel(float a, float b) =>
+    math.abs(a - b) / math.max(a, b) * 100.0 <= tolPct
+
+// ─── Double Top / Double Bottom ───
+f_detectDoublePivot(bool findTop) =>
+    result = false
+    p1 = na
+    p2 = na
+    b1 = 0
+    b2 = 0
+    if array.size(findTop ? pivHPrice : pivLPrice) >= 2
+        p1 := array.get(findTop ? pivHPrice : pivLPrice, 1)
+        p2 := array.get(findTop ? pivHPrice : pivLPrice, 0)
+        b1 := array.get(findTop ? pivHBar : pivLBar, 1)
+        b2 := array.get(findTop ? pivHBar : pivLBar, 0)
+        gap = b2 - b1
+        if gap >= minBars and gap <= maxBars and f_isFlatLevel(p1, p2)
+            result := true
+    [result, p1, p2, b1, b2]
+
+var int drawnDT = 0
+var int drawnDB = 0
+
+// Double Top
+if enDT and barstate.islast and array.size(pivHPrice) >= 2 and (drawnDT < 20 or inProgress)
+    [ok, p1, p2, b1, b2] = f_detectDoublePivot(true)
+    if ok
+        neckLow = math.min(low[b2 - 1], low[math.min(b2, swingLen) - 1])
+        for i = 0 to math.min(b2 - b1, swingLen * 2)
+            if b2 - i >= 0
+                lv = low[b2 - i]
+                if lv < neckLow
+                    neckLow := lv
+        target = neckLow - (p1 - neckLow)
+        reached = f_checkReached(target, false)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status) and drawnDT < 15
+            f_drawLine(b1, p1, b2, p2, COL_BEAR, line.style_solid)
+            f_drawLine(b1, neckLow, b2 + 5, neckLow, COL_BEAR, line.style_dashed)
+            f_patternLabel(b2, p1, "Double Top", false)
+            if f_showTarget(status)
+                f_drawTarget(target, b2, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+            drawnDT += 1
+
+// Double Bottom
+if enDB and barstate.islast and array.size(pivLPrice) >= 2 and (drawnDB < 20 or inProgress)
+    [ok, p1, p2, b1, b2] = f_detectDoublePivot(false)
+    if ok
+        neckHigh = high[b1]
+        for i = 0 to math.min(swingLen * 2, 30)
+            if b1 + i < bar_index
+                hv = high[i]
+                if hv > neckHigh
+                    neckHigh := hv
+        target = neckHigh + (neckHigh - p1)
+        reached = f_checkReached(target, true)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status) and drawnDB < 15
+            f_drawLine(b1, p1, b2, p2, COL_BULL, line.style_solid)
+            f_drawLine(b1, neckHigh, b2 + 5, neckHigh, COL_BULL, line.style_dashed)
+            f_patternLabel(b2, p1, "Double Bottom", true)
+            if f_showTarget(status)
+                f_drawTarget(target, b2, COL_BULL, "TP " + str.tostring(target, format.mintick))
+            drawnDB += 1
+
+// ─── Triple Top / Triple Bottom ───
+var int drawnTT = 0
+var int drawnTB = 0
+
+if enTT and barstate.islast and array.size(pivHPrice) >= 3 and drawnTT < 10
+    p1 = array.get(pivHPrice, 2)
+    p2 = array.get(pivHPrice, 1)
+    p3 = array.get(pivHPrice, 0)
+    b1 = array.get(pivHBar, 2)
+    b2 = array.get(pivHBar, 1)
+    b3 = array.get(pivHBar, 0)
+    if b3 - b1 >= minBars and f_isFlatLevel(p1, p2) and f_isFlatLevel(p2, p3)
+        neckLow = low[b2]
+        for i = 0 to math.min(b3 - b1, 40)
+            idx = b3 - i
+            if idx >= 0 and idx < bar_index
+                lv = low[bar_index - idx]
+                if lv < neckLow
+                    neckLow := lv
+        target = neckLow - (p1 - neckLow)
+        reached = f_checkReached(target, false)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            f_drawLine(b1, p1, b2, p2, COL_BEAR, line.style_solid)
+            f_drawLine(b2, p2, b3, p3, COL_BEAR, line.style_solid)
+            f_drawLine(b1, neckLow, b3 + 5, neckLow, COL_BEAR, line.style_dashed)
+            f_patternLabel(b3, p3, "Triple Top", false)
+            if f_showTarget(status)
+                f_drawTarget(target, b3, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+            drawnTT += 1
+
+if enTB and barstate.islast and array.size(pivLPrice) >= 3 and drawnTB < 10
+    p1 = array.get(pivLPrice, 2)
+    p2 = array.get(pivLPrice, 1)
+    p3 = array.get(pivLPrice, 0)
+    b1 = array.get(pivLBar, 2)
+    b2 = array.get(pivLBar, 1)
+    b3 = array.get(pivLBar, 0)
+    if b3 - b1 >= minBars and f_isFlatLevel(p1, p2) and f_isFlatLevel(p2, p3)
+        neckHigh = high[b2]
+        for i = 0 to math.min(b3 - b1, 40)
+            idx = b2 - i
+            if idx >= 0 and idx < bar_index
+                hv = high[bar_index - idx]
+                if hv > neckHigh
+                    neckHigh := hv
+        target = neckHigh + (neckHigh - p1)
+        reached = f_checkReached(target, true)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            f_drawLine(b1, p1, b2, p2, COL_BULL, line.style_solid)
+            f_drawLine(b2, p2, b3, p3, COL_BULL, line.style_solid)
+            f_drawLine(b1, neckHigh, b3 + 5, neckHigh, COL_BULL, line.style_dashed)
+            f_patternLabel(b3, p3, "Triple Bottom", true)
+            if f_showTarget(status)
+                f_drawTarget(target, b3, COL_BULL, "TP " + str.tostring(target, format.mintick))
+            drawnTB += 1
+
+// ─── Head & Shoulders / Inverse ───
+var int drawnHS = 0
+var int drawnIHS = 0
+
+if enHS and barstate.islast and array.size(pivHPrice) >= 3 and drawnHS < 10
+    ls = array.get(pivHPrice, 2)
+    h  = array.get(pivHPrice, 1)
+    rs = array.get(pivHPrice, 0)
+    lb = array.get(pivHBar, 2)
+    hb = array.get(pivHBar, 1)
+    rb = array.get(pivHBar, 0)
+    if h > ls and h > rs and rb - lb >= minBars and f_isFlatLevel(ls, rs)
+        nl = math.min(low[hb - swingLen], low[rb - swingLen])
+        target = nl - (h - nl)
+        reached = f_checkReached(target, false)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            f_drawLine(lb, ls, hb, h, COL_BEAR, line.style_solid)
+            f_drawLine(hb, h, rb, rs, COL_BEAR, line.style_solid)
+            f_drawLine(lb, nl, rb + 5, nl, COL_BEAR, line.style_dashed)
+            f_patternLabel(rb, rs, "Head & Shoulders", false)
+            if f_showTarget(status)
+                f_drawTarget(target, rb, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+            drawnHS += 1
+
+if enIHS and barstate.islast and array.size(pivLPrice) >= 3 and drawnIHS < 10
+    ls = array.get(pivLPrice, 2)
+    h  = array.get(pivLPrice, 1)
+    rs = array.get(pivLPrice, 0)
+    lb = array.get(pivLBar, 2)
+    hb = array.get(pivLBar, 1)
+    rb = array.get(pivLBar, 0)
+    if h < ls and h < rs and rb - lb >= minBars and f_isFlatLevel(ls, rs)
+        nl = math.max(high[hb - swingLen], high[rb - swingLen])
+        target = nl + (nl - h) * 1.0
+        target := math.max(target, h + (nl - h))
+        reached = f_checkReached(target, true)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            f_drawLine(lb, ls, hb, h, COL_BULL, line.style_solid)
+            f_drawLine(hb, h, rb, rs, COL_BULL, line.style_solid)
+            f_drawLine(lb, nl, rb + 5, nl, COL_BULL, line.style_dashed)
+            f_patternLabel(rb, rs, "Inv Head & Shoulders", true)
+            if f_showTarget(status)
+                f_drawTarget(target, rb, COL_BULL, "TP " + str.tostring(target, format.mintick))
+            drawnIHS += 1
+
+// ─── Wedges (simplified: converging slopes) ───
+var int drawnRW = 0
+var int drawnFW = 0
+var int drawnTri = 0
+var int drawnRect = 0
+
+f_slopeFit(float y1, int x1, float y2, int x2, bool expectUp) =>
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0
+        false
+    else
+        s = dy / dx
+        if expectUp
+            s > 0
+        else
+            s < 0
+
+// Rising Wedge: both highs and lows rising, highs rising slower (converging)
+if enRW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnRW < 10
+    h1 = array.get(pivHPrice, 1)
+    h2 = array.get(pivHPrice, 0)
+    hb1 = array.get(pivHBar, 1)
+    hb2 = array.get(pivHBar, 0)
+    l1 = array.get(pivLPrice, 1)
+    l2 = array.get(pivLPrice, 0)
+    lb1 = array.get(pivLBar, 1)
+    lb2 = array.get(pivLBar, 0)
+    if hb2 > lb2 and f_slopeFit(h1, hb1, h2, hb2, true) and f_slopeFit(l1, lb1, l2, lb2, true)
+        hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
+        lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
+        if hSlope > 0 and lSlope > 0 and lSlope > hSlope
+            target = l2 - (h2 - l2)
+            reached = f_checkReached(target, false)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BEAR, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BEAR, line.style_solid)
+                f_patternLabel(hb2, h2, "Rising Wedge", false)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+                drawnRW += 1
+
+// Falling Wedge: both highs and lows falling, lows falling slower (converging)
+if enFW and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnFW < 10
+    h1 = array.get(pivHPrice, 1)
+    h2 = array.get(pivHPrice, 0)
+    hb1 = array.get(pivHBar, 1)
+    hb2 = array.get(pivHBar, 0)
+    l1 = array.get(pivLPrice, 1)
+    l2 = array.get(pivLPrice, 0)
+    lb1 = array.get(pivLBar, 1)
+    lb2 = array.get(pivLBar, 0)
+    if hb2 > lb2 and f_slopeFit(h1, hb1, h2, hb2, false) and f_slopeFit(l1, lb1, l2, lb2, false)
+        hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
+        lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
+        if hSlope < 0 and lSlope < 0 and hSlope < lSlope
+            target = h2 + (h2 - l2)
+            reached = f_checkReached(target, true)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BULL, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BULL, line.style_solid)
+                f_patternLabel(lb2, l2, "Falling Wedge", true)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BULL, "TP " + str.tostring(target, format.mintick))
+                drawnFW += 1
+
+// Triangle (symmetric / ascending / descending — simplified as converging non-parallel)
+if enTri and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnTri < 10
+    h1 = array.get(pivHPrice, 1)
+    h2 = array.get(pivHPrice, 0)
+    hb1 = array.get(pivHBar, 1)
+    hb2 = array.get(pivHBar, 0)
+    l1 = array.get(pivLPrice, 1)
+    l2 = array.get(pivLPrice, 0)
+    lb1 = array.get(pivLBar, 1)
+    lb2 = array.get(pivLBar, 0)
+    if hb2 > lb2 and not f_isFlatLevel(h1, h2) and not f_isFlatLevel(l1, l2)
+        hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
+        lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
+        // Converging = slopes have opposite signs or magnitudes shrinking range
+        range1 = h1 - l1
+        range2 = h2 - l2
+        if range2 < range1 * 0.85
+            // Determine breakout direction bias
+            isBull = close > (h1 + l1) / 2
+            mid = (h1 + h2 + l1 + l2) / 4
+            target = isBull ? mid + range1 * 0.6 : mid - range1 * 0.6
+            reached = f_checkReached(target, isBull)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                col = isBull ? COL_BULL : COL_BEAR
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), col, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), col, line.style_solid)
+                f_patternLabel(hb2, h2, "Triangle", isBull)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, col, "TP " + str.tostring(target, format.mintick))
+                drawnTri += 1
+
+// Rectangle (flat top and bottom, range-bound)
+if enRect and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnRect < 10
+    h1 = array.get(pivHPrice, 1)
+    h2 = array.get(pivHPrice, 0)
+    hb1 = array.get(pivHBar, 1)
+    hb2 = array.get(pivHBar, 0)
+    l1 = array.get(pivLPrice, 1)
+    l2 = array.get(pivLPrice, 0)
+    lb1 = array.get(pivLBar, 1)
+    lb2 = array.get(pivLBar, 0)
+    if f_isFlatLevel(h1, h2) and f_isFlatLevel(l1, l2) and (h1 - l1) / l1 * 100.0 > tolPct
+        mid = (h1 + h2 + l1 + l2) / 4
+        isBull = close > mid
+        target = isBull ? h1 + (h1 - l1) : l1 - (h1 - l1)
+        reached = f_checkReached(target, isBull)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            x1 = math.min(hb1, lb1)
+            x2 = math.max(hb2, lb2)
+            col = isBull ? COL_BULL : COL_BEAR
+            f_drawBox(x1, h1, x2 + 3, l1, col, false)
+            f_patternLabel(x2, mid, "Rectangle", isBull)
+            if f_showTarget(status)
+                f_drawTarget(target, x2, col, "TP " + str.tostring(target, format.mintick))
+            drawnRect += 1
+
+// ─── Flags & Pennants ───
+var int drawnBF = 0
+var int drawnEF = 0
+var int drawnBP = 0
+var int drawnEP = 0
+
+// Bullish Flag: sharp rise (pole), then small downward channel
+if enBF and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnBF < 10
+    // Look for a strong pole: big move up over last N bars
+    lookback = math.min(30, bar_index)
+    poleMove = (close - low[lookback]) / low[lookback] * 100.0
+    if poleMove > tolPct * 2
+        // Flag channel: slight downward drift after the pole high
+        h1 = array.get(pivHPrice, 0)
+        l1 = array.get(pivLPrice, 0)
+        hSlope = (h1 - array.get(pivHPrice, 1)) / math.max(array.get(pivHBar, 0) - array.get(pivHBar, 1), 1)
+        lSlope = (l1 - array.get(pivLPrice, 1)) / math.max(array.get(pivLBar, 0) - array.get(pivLBar, 1), 1)
+        if hSlope <= 0 and lSlope <= 0
+            poleH = h1
+            flagLow = l1
+            target = poleH + (poleH - flagLow)
+            reached = f_checkReached(target, true)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                hb1 = array.get(pivHBar, 1)
+                hb2 = array.get(pivHBar, 0)
+                lb1 = array.get(pivLBar, 1)
+                lb2 = array.get(pivLBar, 0)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BULL, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BULL, line.style_solid)
+                f_patternLabel(hb2, h1, "Bull Flag", true)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BULL, "TP " + str.tostring(target, format.mintick))
+                drawnBF += 1
+
+// Bearish Flag: sharp drop (pole), then small upward channel
+if enEF and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnEF < 10
+    lookback = math.min(30, bar_index)
+    poleMove = (high[lookback] - close) / high[lookback] * 100.0
+    if poleMove > tolPct * 2
+        h1 = array.get(pivHPrice, 0)
+        l1 = array.get(pivLPrice, 0)
+        hSlope = (h1 - array.get(pivHPrice, 1)) / math.max(array.get(pivHBar, 0) - array.get(pivHBar, 1), 1)
+        lSlope = (l1 - array.get(pivLPrice, 1)) / math.max(array.get(pivLBar, 0) - array.get(pivLBar, 1), 1)
+        if hSlope >= 0 and lSlope >= 0
+            poleL = l1
+            flagHigh = h1
+            target = poleL - (flagHigh - poleL)
+            reached = f_checkReached(target, false)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                hb1 = array.get(pivHBar, 1)
+                hb2 = array.get(pivHBar, 0)
+                lb1 = array.get(pivLBar, 1)
+                lb2 = array.get(pivLBar, 0)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BEAR, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BEAR, line.style_solid)
+                f_patternLabel(hb2, h1, "Bear Flag", false)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+                drawnEF += 1
+
+// Bullish Pennant: sharp rise, then converging triangle consolidation
+if enBP and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnBP < 10
+    lookback = math.min(30, bar_index)
+    poleMove = (close - low[lookback]) / low[lookback] * 100.0
+    if poleMove > tolPct * 2
+        h1 = array.get(pivHPrice, 1)
+        h2 = array.get(pivHPrice, 0)
+        l1 = array.get(pivLPrice, 1)
+        l2 = array.get(pivLPrice, 0)
+        range1 = h1 - l1
+        range2 = h2 - l2
+        if range2 < range1 * 0.7
+            target = h2 + range1
+            reached = f_checkReached(target, true)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                hb1 = array.get(pivHBar, 1)
+                hb2 = array.get(pivHBar, 0)
+                lb1 = array.get(pivLBar, 1)
+                lb2 = array.get(pivLBar, 0)
+                hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
+                lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BULL, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BULL, line.style_solid)
+                f_patternLabel(hb2, h2, "Bull Pennant", true)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BULL, "TP " + str.tostring(target, format.mintick))
+                drawnBP += 1
+
+// Bearish Pennant: sharp drop, then converging triangle consolidation
+if enEP and barstate.islast and array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2 and drawnEP < 10
+    lookback = math.min(30, bar_index)
+    poleMove = (high[lookback] - close) / high[lookback] * 100.0
+    if poleMove > tolPct * 2
+        h1 = array.get(pivHPrice, 1)
+        h2 = array.get(pivHPrice, 0)
+        l1 = array.get(pivLPrice, 1)
+        l2 = array.get(pivLPrice, 0)
+        range1 = h1 - l1
+        range2 = h2 - l2
+        if range2 < range1 * 0.7
+            target = l2 - range1
+            reached = f_checkReached(target, false)
+            status = reached ? S_REACHED : S_AWAITING
+            if f_showPattern(status)
+                hb1 = array.get(pivHBar, 1)
+                hb2 = array.get(pivHBar, 0)
+                lb1 = array.get(pivLBar, 1)
+                lb2 = array.get(pivLBar, 0)
+                hSlope = (h2 - h1) / math.max(hb2 - hb1, 1)
+                lSlope = (l2 - l1) / math.max(lb2 - lb1, 1)
+                f_drawLine(hb1, h1, hb2 + 5, h1 + hSlope * (hb2 + 5 - hb1), COL_BEAR, line.style_solid)
+                f_drawLine(lb1, l1, lb2 + 5, l1 + lSlope * (lb2 + 5 - lb1), COL_BEAR, line.style_solid)
+                f_patternLabel(hb2, h2, "Bear Pennant", false)
+                if f_showTarget(status)
+                    f_drawTarget(target, hb2, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+                drawnEP += 1
+
+// ─── Cup and Handle / Inverted ───
+var int drawnCH = 0
+var int drawnICH = 0
+
+// Cup and Handle: U-shaped recovery + small pullback (handle)
+if enCH and barstate.islast and bar_index > maxBars and drawnCH < 10
+    lookback = math.min(maxBars, bar_index - 1)
+    cupHigh = high[lookback]
+    cupHighBar = bar_index - lookback
+    // Find the lowest point in the middle of the range
+    midStart = math.floor(lookback * 0.2)
+    midEnd = math.floor(lookback * 0.8)
+    cupLow = low[midEnd]
+    cupLowBar = bar_index - midEnd
+    for i = midStart to midEnd
+        if low[i] < cupLow
+            cupLow := low[i]
+            cupLowBar := bar_index - i
+    // Recovery: recent price near or above cup rim
+    rimDiff = math.abs(close - cupHigh) / cupHigh * 100.0
+    depth = (cupHigh - cupLow) / cupHigh * 100.0
+    // Handle: small dip from recent high
+    recentHigh = ta.highest(high, math.min(10, bar_index))
+    handleDip = (recentHigh - close) / recentHigh * 100.0
+    if depth > tolPct and cupLowBar > cupHighBar and rimDiff < tolPct * 3 and handleDip < depth * 0.5 and handleDip > 0
+        target = cupHigh + (cupHigh - cupLow)
+        reached = f_checkReached(target, true)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            // Draw cup arc approximation
+            f_drawLine(cupHighBar, cupHigh, cupLowBar, cupLow, COL_BULL, line.style_solid)
+            f_drawLine(cupLowBar, cupLow, bar_index - 1, cupHigh, COL_BULL, line.style_solid)
+            f_drawLine(cupHighBar, cupHigh, bar_index + 5, cupHigh, COL_BULL, line.style_dashed)
+            f_patternLabel(bar_index - 1, cupHigh, "Cup & Handle", true)
+            if f_showTarget(status)
+                f_drawTarget(target, bar_index, COL_BULL, "TP " + str.tostring(target, format.mintick))
+            drawnCH += 1
+
+// Inverted Cup and Handle
+if enICH and barstate.islast and bar_index > maxBars and drawnICH < 10
+    lookback = math.min(maxBars, bar_index - 1)
+    cupLow = low[lookback]
+    cupLowBar = bar_index - lookback
+    midStart = math.floor(lookback * 0.2)
+    midEnd = math.floor(lookback * 0.8)
+    cupHigh = high[midEnd]
+    cupHighBar := bar_index - midEnd
+    for i = midStart to midEnd
+        if high[i] > cupHigh
+            cupHigh := high[i]
+            cupHighBar := bar_index - i
+    rimDiff = math.abs(close - cupLow) / cupLow * 100.0
+    depth = (cupHigh - cupLow) / cupLow * 100.0
+    recentLow = ta.lowest(low, math.min(10, bar_index))
+    handlePop = (close - recentLow) / recentLow * 100.0
+    if depth > tolPct and cupHighBar > cupLowBar and rimDiff < tolPct * 3 and handlePop < depth * 0.5 and handlePop > 0
+        target = cupLow - (cupHigh - cupLow)
+        reached = f_checkReached(target, false)
+        status = reached ? S_REACHED : S_AWAITING
+        if f_showPattern(status)
+            f_drawLine(cupLowBar, cupLow, cupHighBar, cupHigh, COL_BEAR, line.style_solid)
+            f_drawLine(cupHighBar, cupHigh, bar_index - 1, cupLow, COL_BEAR, line.style_solid)
+            f_drawLine(cupLowBar, cupLow, bar_index + 5, cupLow, COL_BEAR, line.style_dashed)
+            f_patternLabel(bar_index - 1, cupLow, "Inv Cup & Handle", false)
+            if f_showTarget(status)
+                f_drawTarget(target, bar_index, COL_BEAR, "TP " + str.tostring(target, format.mintick))
+            drawnICH += 1
+
+// ───────────────────────── STATUS TABLE ─────────────────────────
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 80), border_width = 1)
+
+if barstate.islast and patternsFilter != "Last Awaiting"
+    table.cell(infoTable, 0, 0, "Pattern", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 1, 0, "Count", text_color = color.white, text_size = size.small)
+    patterns = array.from("Double Top", "Double Bottom", "Triple Top", "Triple Bottom", "H&S", "Inv H&S", "Rising Wedge", "Falling Wedge", "Triangle", "Rectangle", "Bull Flag", "Bear Flag", "Bull Pennant", "Bear Pennant", "Cup & Handle", "Inv Cup & Handle")
+    counts = array.from(drawnDT, drawnDB, drawnTT, drawnTB, drawnHS, drawnIHS, drawnRW, drawnFW, drawnTri, drawnRect, drawnBF, drawnEF, drawnBP, drawnEP, drawnCH, drawnICH)
+    row = 1
+    for i = 0 to array.size(patterns) - 1
+        if array.get(counts, i) > 0
+            table.cell(infoTable, 0, row, array.get(patterns, i), text_color = color.white, text_size = size.tiny)
+            table.cell(infoTable, 1, row, str.tostring(array.get(counts, i)), text_color = color.white, text_size = size.tiny)
+            row += 1
+
+// ───────────────────────── ALERTS ─────────────────────────
+alertcondition(drawnDT > 0 and drawnDT[1] == 0, "Double Top Detected", "Double Top pattern detected")
+alertcondition(drawnDB > 0 and drawnDB[1] == 0, "Double Bottom Detected", "Double Bottom pattern detected")
+alertcondition(drawnHS > 0 and drawnHS[1] == 0, "H&S Detected", "Head & Shoulders pattern detected")
+alertcondition(drawnIHS > 0 and drawnIHS[1] == 0, "Inv H&S Detected", "Inverse Head & Shoulders pattern detected")
+alertcondition(drawnRW > 0 and drawnRW[1] == 0, "Rising Wedge Detected", "Rising Wedge pattern detected")
+alertcondition(drawnFW > 0 and drawnFW[1] == 0, "Falling Wedge Detected", "Falling Wedge pattern detected")
+alertcondition(drawnCH > 0 and drawnCH[1] == 0, "Cup & Handle Detected", "Cup and Handle pattern detected")
+alertcondition(drawnTri > 0 and drawnTri[1] == 0, "Triangle Detected", "Triangle pattern detected")
+alertcondition(drawnRect > 0 and drawnRect[1] == 0, "Rectangle Detected", "Rectangle pattern detected")
+alertcondition(drawnBF > 0 and drawnBF[1] == 0, "Bull Flag Detected", "Bullish Flag pattern detected")
+alertcondition(drawnEF > 0 and drawnEF[1] == 0, "Bear Flag Detected", "Bearish Flag pattern detected")
+
+// ───────────────────────── IN-PROGRESS EMERGING MARKERS ─────────────────────────
+// Simple emerging pattern markers on recent bars
+if inProgress and barstate.islast
+    // Emerging double top: two similar recent highs
+    if array.size(pivHPrice) >= 2
+        p1 = array.get(pivHPrice, 1)
+        p2 = array.get(pivHPrice, 0)
+        b1 = array.get(pivHBar, 1)
+        b2 = array.get(pivHBar, 0)
+        if b2 > b1 and f_isFlatLevel(p1, p2) and bar_index - b2 < 10
+            label.new(b2, p2, "DT?", style = label.style_label_down, color = color.new(COL_BEAR, 70), textcolor = COL_BEAR, size = size.tiny)
+    // Emerging double bottom
+    if array.size(pivLPrice) >= 2
+        p1 = array.get(pivLPrice, 1)
+        p2 = array.get(pivLPrice, 0)
+        b1 = array.get(pivLBar, 1)
+        b2 = array.get(pivLBar, 0)
+        if b2 > b1 and f_isFlatLevel(p1, p2) and bar_index - b2 < 10
+            label.new(b2, p2, "DB?", style = label.style_label_up, color = color.new(COL_BULL, 70), textcolor = COL_BULL, size = size.tiny)
+
+// End of script
