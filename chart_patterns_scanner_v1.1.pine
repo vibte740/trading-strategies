@@ -1,7 +1,8 @@
 //@version=6
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © vibte740
-// Chart Patterns Scanner v1.1 — Pine Script v6
+// Chart Patterns Scanner v1.2 — Pine Script v6
+// v1.2: overlapping labels are merged into one stacked label (no more text-on-text overlap).
 // Detects (latest occurrence of each): Flags, Pennants, Double/Triple Top/Bottom,
 // Head & Shoulders, Inverse H&S, Wedges, Triangles, Rectangles, Cup & Handle, Inverted Cup & Handle.
 
@@ -11,6 +12,9 @@ indicator("Chart Patterns Scanner [v6]", overlay = true, max_boxes_count = 500, 
 patternsFilter = input.string("All", "Patterns", options = ["All", "Awaiting and Reached", "Only Awaiting", "Last Awaiting"], group = "Display")
 targetsFilter  = input.string("All", "Price Targets", options = ["All", "Only Awaiting", "Awaiting and Reached", "None"], group = "Display")
 inProgress     = input.bool(true, "In Progress (search emerging patterns)", group = "Display")
+mergeLabels    = input.bool(true, "Merge overlapping labels", group = "Display")
+lblXTol        = input.int(12, "Label merge distance (bars)", minval = 1, maxval = 100, group = "Display")
+lblYTol        = input.float(2.0, "Label merge distance (ATR multiple)", minval = 0.2, maxval = 10.0, step = 0.1, group = "Display")
 
 grpFlags = "Flags & Pennants"
 enBF = input.bool(true, "Bullish Flag",    group = grpFlags)
@@ -66,6 +70,8 @@ string NM_EP   = "Bear Pennant"
 string NM_CH   = "Cup & Handle"
 string NM_ICH  = "Inv Cup & Handle"
 
+float atrV = ta.atr(14)
+
 // ───────────────────────── TYPES ─────────────────────────
 // Channel built from the last two pivot highs and the last two pivot lows
 type Chan
@@ -114,6 +120,12 @@ var box[]    gBoxes  = array.new<box>()
 var string[] gNames  = array.new<string>()
 var string[] gStat   = array.new<string>()
 
+// Pending pattern labels (collected first, merged/flushed once at the end)
+var int[]    lblX = array.new_int(0)
+var float[]  lblY = array.new_float(0)
+var string[] lblT = array.new_string(0)
+var bool[]   lblB = array.new_bool(0)
+
 f_clear() =>
     for l in gLines
         line.delete(l)
@@ -126,6 +138,10 @@ f_clear() =>
     array.clear(gBoxes)
     array.clear(gNames)
     array.clear(gStat)
+    array.clear(lblX)
+    array.clear(lblY)
+    array.clear(lblT)
+    array.clear(lblB)
     true
 
 // ───────────────────────── HELPERS ─────────────────────────
@@ -179,9 +195,50 @@ f_box(int x1, float y1, int x2, float y2, color col) =>
     array.push(gBoxes, box.new(x1, y1, x2, y2, border_color = col, border_width = 1, border_style = line.style_dashed, bgcolor = color.new(col, 92)))
     true
 
+// Queue a label; actual drawing happens in f_flushLabels() so nearby labels can be merged.
 f_label(int x, float y, string txt, bool isBull) =>
+    array.push(lblX, x)
+    array.push(lblY, y)
+    array.push(lblT, txt)
+    array.push(lblB, isBull)
+    true
+
+f_drawLabel(int x, float y, string txt, bool isBull) =>
     color c = f_col(isBull)
     array.push(gLabels, label.new(x, y, txt, style = isBull ? label.style_label_up : label.style_label_down, color = color.new(c, 70), textcolor = c, size = size.small))
+    true
+
+// Merge labels that sit close together (same direction) into ONE multi-line label.
+f_flushLabels() =>
+    int n = array.size(lblX)
+    if n > 0
+        bool[] used = array.new_bool(n, false)
+        float yTol = nz(atrV, 0.0) * lblYTol
+        for i = 0 to n - 1
+            if not array.get(used, i)
+                array.set(used, i, true)
+                bool bull = array.get(lblB, i)
+                int sx = array.get(lblX, i)
+                float sy = array.get(lblY, i)
+                string[] names = array.new_string(0)
+                array.push(names, array.get(lblT, i))
+                int sumX = sx
+                float anchorY = sy
+                int cnt = 1
+                if mergeLabels and i < n - 1
+                    for j = i + 1 to n - 1
+                        if not array.get(used, j) and array.get(lblB, j) == bull and math.abs(array.get(lblX, j) - sx) <= lblXTol and math.abs(array.get(lblY, j) - sy) <= yTol
+                            array.set(used, j, true)
+                            string t2 = array.get(lblT, j)
+                            if not array.includes(names, t2)
+                                array.push(names, t2)
+                            sumX += array.get(lblX, j)
+                            // keep the outermost price so the label doesn't cover the pattern
+                            anchorY := bull ? math.min(anchorY, array.get(lblY, j)) : math.max(anchorY, array.get(lblY, j))
+                            cnt += 1
+                int ax = mergeLabels ? math.round(sumX / cnt) : sx
+                string txt = array.join(names, "\n")
+                f_drawLabel(ax, anchorY, txt, bull)
     true
 
 f_target(float price, int fromBar, bool reached) =>
@@ -551,6 +608,9 @@ if barstate.islast
                 [pullHigh, pullB] = f_highestHigh(pB, bar_index)
                 if (pullHigh - pP) / pP * 100.0 >= tolPct * 2
                     f_label(bar_index, low, "DB?", true)
+
+    // ─── Draw all queued labels (overlapping ones are merged into one) ───
+    f_flushLabels()
 
     // ─── Status table ───
     table.clear(tbl, 0, 0, 1, 19)
