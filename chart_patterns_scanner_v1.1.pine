@@ -1,0 +1,602 @@
+//@version=6
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © vibte740
+// Chart Patterns Scanner v1.1 — Pine Script v6
+// Detects (latest occurrence of each): Flags, Pennants, Double/Triple Top/Bottom,
+// Head & Shoulders, Inverse H&S, Wedges, Triangles, Rectangles, Cup & Handle, Inverted Cup & Handle.
+
+indicator("Chart Patterns Scanner [v6]", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1500)
+
+// ───────────────────────── INPUTS ─────────────────────────
+patternsFilter = input.string("All", "Patterns", options = ["All", "Awaiting and Reached", "Only Awaiting", "Last Awaiting"], group = "Display")
+targetsFilter  = input.string("All", "Price Targets", options = ["All", "Only Awaiting", "Awaiting and Reached", "None"], group = "Display")
+inProgress     = input.bool(true, "In Progress (search emerging patterns)", group = "Display")
+
+grpFlags = "Flags & Pennants"
+enBF = input.bool(true, "Bullish Flag",    group = grpFlags)
+enEF = input.bool(true, "Bearish Flag",    group = grpFlags)
+enBP = input.bool(true, "Bullish Pennant", group = grpFlags)
+enEP = input.bool(true, "Bearish Pennant", group = grpFlags)
+
+grpHS = "Head & Shoulders"
+enHS  = input.bool(true, "Head And Shoulders",         group = grpHS)
+enIHS = input.bool(true, "Inverse Head And Shoulders", group = grpHS)
+
+grpDT = "Double & Triple"
+enDT = input.bool(true, "Double Top",    group = grpDT)
+enDB = input.bool(true, "Double Bottom", group = grpDT)
+enTT = input.bool(true, "Triple Top",    group = grpDT)
+enTB = input.bool(true, "Triple Bottom", group = grpDT)
+
+grpWR = "Wedges & Triangles"
+enRW   = input.bool(true, "Rising Wedge",  group = grpWR)
+enFW   = input.bool(true, "Falling Wedge", group = grpWR)
+enTri  = input.bool(true, "Triangle",      group = grpWR)
+enRect = input.bool(true, "Rectangle",     group = grpWR)
+
+grpCH = "Cup & Handle"
+enCH  = input.bool(true, "Cup and Handle",          group = grpCH)
+enICH = input.bool(true, "Inverted Cup and Handle", group = grpCH)
+
+swingLen   = input.int(5, "Swing Length (pivot bars)", minval = 3, maxval = 20, group = "Sensitivity")
+tolPct     = input.float(0.5, "Level Match Tolerance %", minval = 0.1, maxval = 5.0, step = 0.1, group = "Sensitivity")
+minBars    = input.int(10, "Min Pattern Length (bars)", minval = 5, maxval = 100, group = "Sensitivity")
+maxBars    = input.int(60, "Max Pattern Length (bars)", minval = 20, maxval = 300, group = "Sensitivity")
+poleBars   = input.int(20, "Flag/Pennant Pole Window (bars)", minval = 5, maxval = 100, group = "Sensitivity")
+poleMinPct = input.float(3.0, "Flag/Pennant Min Pole Move %", minval = 0.5, maxval = 50.0, step = 0.5, group = "Sensitivity")
+
+// ───────────────────────── CONSTANTS ─────────────────────────
+color COL_BULL = #26a69a
+color COL_BEAR = #ef5350
+
+string NM_DT   = "Double Top"
+string NM_DB   = "Double Bottom"
+string NM_TT   = "Triple Top"
+string NM_TB   = "Triple Bottom"
+string NM_HS   = "Head & Shoulders"
+string NM_IHS  = "Inv Head & Shoulders"
+string NM_RW   = "Rising Wedge"
+string NM_FW   = "Falling Wedge"
+string NM_TRI  = "Triangle"
+string NM_RECT = "Rectangle"
+string NM_BF   = "Bull Flag"
+string NM_EF   = "Bear Flag"
+string NM_BP   = "Bull Pennant"
+string NM_EP   = "Bear Pennant"
+string NM_CH   = "Cup & Handle"
+string NM_ICH  = "Inv Cup & Handle"
+
+// ───────────────────────── TYPES ─────────────────────────
+// Channel built from the last two pivot highs and the last two pivot lows
+type Chan
+    float h1
+    int   hb1
+    float h2
+    int   hb2
+    float l1
+    int   lb1
+    float l2
+    int   lb2
+    float hs      // upper line slope (per bar)
+    float ls      // lower line slope (per bar)
+    float h0      // channel height at start
+    float hE      // channel height at end
+    int   fb      // first bar of channel
+    int   lastB   // last pivot bar of channel
+
+// ───────────────────────── PIVOTS ─────────────────────────
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float[] pivHPrice = array.new_float(0)
+var int[]   pivHBar   = array.new_int(0)
+var float[] pivLPrice = array.new_float(0)
+var int[]   pivLBar   = array.new_int(0)
+
+if not na(ph)
+    array.unshift(pivHPrice, ph)
+    array.unshift(pivHBar, bar_index - swingLen)
+    if array.size(pivHPrice) > 50
+        array.pop(pivHPrice)
+        array.pop(pivHBar)
+
+if not na(pl)
+    array.unshift(pivLPrice, pl)
+    array.unshift(pivLBar, bar_index - swingLen)
+    if array.size(pivLPrice) > 50
+        array.pop(pivLPrice)
+        array.pop(pivLBar)
+
+// ───────────────────────── DRAWING STORAGE ─────────────────────────
+var line[]   gLines  = array.new<line>()
+var label[]  gLabels = array.new<label>()
+var box[]    gBoxes  = array.new<box>()
+var string[] gNames  = array.new<string>()
+var string[] gStat   = array.new<string>()
+
+f_clear() =>
+    for l in gLines
+        line.delete(l)
+    for lb in gLabels
+        label.delete(lb)
+    for b in gBoxes
+        box.delete(b)
+    array.clear(gLines)
+    array.clear(gLabels)
+    array.clear(gBoxes)
+    array.clear(gNames)
+    array.clear(gStat)
+    true
+
+// ───────────────────────── HELPERS ─────────────────────────
+f_near(float a, float b, float mult) =>
+    math.abs(a - b) / math.max(a, b) * 100.0 <= tolPct * mult
+
+// Lowest low / highest high between two ABSOLUTE bar indexes. Returns [value, barIndex]
+f_lowestLow(int fromBar, int toBar) =>
+    float m = na
+    int mb = na
+    int a = math.max(math.min(fromBar, toBar), 0)
+    int z = math.min(math.max(fromBar, toBar), bar_index)
+    for b = a to z
+        float v = low[bar_index - b]
+        if na(m) or v < m
+            m := v
+            mb := b
+    [m, mb]
+
+f_highestHigh(int fromBar, int toBar) =>
+    float m = na
+    int mb = na
+    int a = math.max(math.min(fromBar, toBar), 0)
+    int z = math.min(math.max(fromBar, toBar), bar_index)
+    for b = a to z
+        float v = high[bar_index - b]
+        if na(m) or v > m
+            m := v
+            mb := b
+    [m, mb]
+
+f_reachedBull(float target, int fromBar) =>
+    [m, mb] = f_highestHigh(fromBar, bar_index)
+    m >= target
+
+f_reachedBear(float target, int fromBar) =>
+    [m, mb] = f_lowestLow(fromBar, bar_index)
+    m <= target
+
+f_show(bool reached) =>
+    (patternsFilter == "Only Awaiting" or patternsFilter == "Last Awaiting") ? not reached : true
+
+f_col(bool isBull) =>
+    isBull ? COL_BULL : COL_BEAR
+
+f_line(int x1, float y1, int x2, float y2, color col, string sty) =>
+    array.push(gLines, line.new(x1, y1, x2, y2, color = col, width = 1, style = sty))
+    true
+
+f_box(int x1, float y1, int x2, float y2, color col) =>
+    array.push(gBoxes, box.new(x1, y1, x2, y2, border_color = col, border_width = 1, border_style = line.style_dashed, bgcolor = color.new(col, 92)))
+    true
+
+f_label(int x, float y, string txt, bool isBull) =>
+    color c = f_col(isBull)
+    array.push(gLabels, label.new(x, y, txt, style = isBull ? label.style_label_up : label.style_label_down, color = color.new(c, 70), textcolor = c, size = size.small))
+    true
+
+f_target(float price, int fromBar, bool reached) =>
+    bool shown = false
+    if targetsFilter == "All" or targetsFilter == "Awaiting and Reached" or (targetsFilter == "Only Awaiting" and not reached)
+        int xEnd = bar_index + 8
+        array.push(gLines, line.new(fromBar, price, xEnd, price, color = color.new(color.orange, reached ? 55 : 15), width = 1, style = line.style_dotted))
+        array.push(gLabels, label.new(xEnd, price, "TP " + str.tostring(price, format.mintick) + (reached ? "  ✓" : ""), style = label.style_label_left, color = color.new(color.orange, 85), textcolor = color.orange, size = size.tiny))
+        shown := true
+    shown
+
+f_note(string name, bool reached) =>
+    array.push(gNames, name)
+    array.push(gStat, reached ? "Reached" : "Awaiting")
+    true
+
+// ───────────────────────── CHANNEL HELPERS ─────────────────────────
+f_chan() =>
+    Chan c = na
+    if array.size(pivHPrice) >= 2 and array.size(pivLPrice) >= 2
+        float h2  = array.get(pivHPrice, 0)
+        float h1  = array.get(pivHPrice, 1)
+        int   hb2 = array.get(pivHBar, 0)
+        int   hb1 = array.get(pivHBar, 1)
+        float l2  = array.get(pivLPrice, 0)
+        float l1  = array.get(pivLPrice, 1)
+        int   lb2 = array.get(pivLBar, 0)
+        int   lb1 = array.get(pivLBar, 1)
+        int fb    = math.min(hb1, lb1)
+        int lastB = math.max(hb2, lb2)
+        if lastB > fb and hb2 > hb1 and lb2 > lb1 and bar_index - lastB <= maxBars and lastB - fb <= maxBars
+            float hs  = (h2 - h1) / (hb2 - hb1)
+            float ls  = (l2 - l1) / (lb2 - lb1)
+            float up0 = h1 + hs * (fb - hb1)
+            float lo0 = l1 + ls * (fb - lb1)
+            float upE = h1 + hs * (lastB - hb1)
+            float loE = l1 + ls * (lastB - lb1)
+            c := Chan.new(h1, hb1, h2, hb2, l1, lb1, l2, lb2, hs, ls, up0 - lo0, upE - loE, fb, lastB)
+    c
+
+f_up(Chan c, int x) =>
+    c.h1 + c.hs * (x - c.hb1)
+
+f_lo(Chan c, int x) =>
+    c.l1 + c.ls * (x - c.lb1)
+
+f_drawChan(Chan c, color col) =>
+    int ex = c.lastB + 5
+    f_line(c.fb, f_up(c, c.fb), ex, f_up(c, ex), col, line.style_solid)
+    f_line(c.fb, f_lo(c, c.fb), ex, f_lo(c, ex), col, line.style_solid)
+    true
+
+// Pole before a flag/pennant. Returns [found, poleHeight]
+f_pole(int fb, bool up) =>
+    bool ok = false
+    float pHeight = 0.0
+    int a = math.max(fb - poleBars, 0)
+    [lo, loB] = f_lowestLow(a, fb)
+    [hi, hiB] = f_highestHigh(a, fb)
+    if not na(lo) and not na(hi) and lo > 0 and hi > 0
+        if up and loB < hiB and (hi - lo) / lo * 100.0 >= poleMinPct and hiB >= fb - swingLen * 2
+            ok := true
+            pHeight := hi - lo
+        else if not up and hiB < loB and (hi - lo) / hi * 100.0 >= poleMinPct and loB >= fb - swingLen * 2
+            ok := true
+            pHeight := hi - lo
+    [ok, pHeight]
+
+f_flag(Chan c, bool bull, bool pennant) =>
+    bool found = false
+    if not na(c)
+        if c.lastB - c.fb >= 4
+            bool shapeOk = false
+            if pennant
+                shapeOk := c.h0 > 0 and c.hE > 0 and c.hE < c.h0 * 0.7
+            else
+                bool dirOk = bull ? (c.hs <= 0 and c.ls <= 0) : (c.hs >= 0 and c.ls >= 0)
+                shapeOk := dirOk and c.h0 > 0 and c.hE >= c.h0 * 0.75 and c.hE <= c.h0 * 1.25
+            if shapeOk
+                [poleOk, poleH] = f_pole(c.fb, bull)
+                if poleOk and c.h0 < poleH
+                    float target = bull ? f_up(c, c.lastB) + poleH : f_lo(c, c.lastB) - poleH
+                    bool reached = bull ? f_reachedBull(target, c.lastB) : f_reachedBear(target, c.lastB)
+                    if f_show(reached)
+                        string nm = bull ? (pennant ? NM_BP : NM_BF) : (pennant ? NM_EP : NM_EF)
+                        f_drawChan(c, f_col(bull))
+                        f_label(c.lastB, bull ? f_lo(c, c.lastB) : f_up(c, c.lastB), nm, bull)
+                        f_target(target, c.lastB, reached)
+                        f_note(nm, reached)
+                        found := true
+    found
+
+// ───────────────────────── CUP & HANDLE ─────────────────────────
+f_cup(bool inv, int L) =>
+    bool found = false
+    if bar_index > L + 5
+        int sb      = bar_index - L
+        int leftEnd = sb + math.floor(L * 0.25)
+        int midEnd  = sb + math.floor(L * 0.8)
+        if not inv
+            [lh, lhB] = f_highestHigh(sb, leftEnd)
+            [cl, clB] = f_lowestLow(leftEnd, midEnd)
+            [rr, rrB] = f_highestHigh(clB, bar_index)
+            float depth = (lh - cl) / lh * 100.0
+            float dip   = (rr - close) / rr * 100.0
+            if depth >= tolPct * 2 and rrB - clB >= L * 0.15 and bar_index - rrB >= 2 and f_near(lh, rr, 3.0) and dip > 0 and dip < depth * 0.5
+                float target = lh + (lh - cl)
+                bool reached = f_reachedBull(target, rrB)
+                if f_show(reached)
+                    f_line(lhB, lh, clB, cl, COL_BULL, line.style_solid)
+                    f_line(clB, cl, rrB, rr, COL_BULL, line.style_solid)
+                    f_line(rrB, rr, bar_index, close, COL_BULL, line.style_solid)
+                    f_line(lhB, lh, bar_index + 5, lh, COL_BULL, line.style_dashed)
+                    f_label(clB, cl, NM_CH, true)
+                    f_target(target, rrB, reached)
+                    f_note(NM_CH, reached)
+                    found := true
+        else
+            [ll, llB]   = f_lowestLow(sb, leftEnd)
+            [cup, cupB] = f_highestHigh(leftEnd, midEnd)
+            [rl, rlB]   = f_lowestLow(cupB, bar_index)
+            float depth = (cup - ll) / cup * 100.0
+            float pop   = (close - rl) / rl * 100.0
+            if depth >= tolPct * 2 and rlB - cupB >= L * 0.15 and bar_index - rlB >= 2 and f_near(ll, rl, 3.0) and pop > 0 and pop < depth * 0.5
+                float target = ll - (cup - ll)
+                bool reached = f_reachedBear(target, rlB)
+                if f_show(reached)
+                    f_line(llB, ll, cupB, cup, COL_BEAR, line.style_solid)
+                    f_line(cupB, cup, rlB, rl, COL_BEAR, line.style_solid)
+                    f_line(rlB, rl, bar_index, close, COL_BEAR, line.style_solid)
+                    f_line(llB, ll, bar_index + 5, ll, COL_BEAR, line.style_dashed)
+                    f_label(cupB, cup, NM_ICH, false)
+                    f_target(target, rlB, reached)
+                    f_note(NM_ICH, reached)
+                    found := true
+    found
+
+// ───────────────────────── STATUS TABLE ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 20, bgcolor = color.new(color.black, 80), border_width = 1)
+
+// ───────────────────────── MAIN DETECTION (last bar only) ─────────────────────────
+if barstate.islast
+    f_clear()
+    Chan ch = f_chan()
+
+    // ─── Double Top ───
+    if enDT and array.size(pivHPrice) >= 2
+        float p2 = array.get(pivHPrice, 0)
+        float p1 = array.get(pivHPrice, 1)
+        int   b2 = array.get(pivHBar, 0)
+        int   b1 = array.get(pivHBar, 1)
+        if b2 - b1 >= minBars and b2 - b1 <= maxBars and bar_index - b2 <= maxBars and f_near(p1, p2, 1.0)
+            [neck, neckB]   = f_lowestLow(b1, b2)
+            [topMax, topB]  = f_highestHigh(b1, b2)
+            float height = (p1 + p2) / 2.0 - neck
+            if height / neck * 100.0 >= tolPct and topMax <= math.max(p1, p2) * (1.0 + tolPct / 100.0)
+                float target = neck - height
+                bool reached = f_reachedBear(target, b2)
+                if f_show(reached)
+                    f_line(b1, p1, b2, p2, COL_BEAR, line.style_solid)
+                    f_line(b1, neck, b2 + 8, neck, COL_BEAR, line.style_dashed)
+                    f_label(b2, p2, NM_DT, false)
+                    f_target(target, b2, reached)
+                    f_note(NM_DT, reached)
+
+    // ─── Double Bottom ───
+    if enDB and array.size(pivLPrice) >= 2
+        float p2 = array.get(pivLPrice, 0)
+        float p1 = array.get(pivLPrice, 1)
+        int   b2 = array.get(pivLBar, 0)
+        int   b1 = array.get(pivLBar, 1)
+        if b2 - b1 >= minBars and b2 - b1 <= maxBars and bar_index - b2 <= maxBars and f_near(p1, p2, 1.0)
+            [neck, neckB]   = f_highestHigh(b1, b2)
+            [botMin, botB]  = f_lowestLow(b1, b2)
+            float height = neck - (p1 + p2) / 2.0
+            if height / neck * 100.0 >= tolPct and botMin >= math.min(p1, p2) * (1.0 - tolPct / 100.0)
+                float target = neck + height
+                bool reached = f_reachedBull(target, b2)
+                if f_show(reached)
+                    f_line(b1, p1, b2, p2, COL_BULL, line.style_solid)
+                    f_line(b1, neck, b2 + 8, neck, COL_BULL, line.style_dashed)
+                    f_label(b2, p2, NM_DB, true)
+                    f_target(target, b2, reached)
+                    f_note(NM_DB, reached)
+
+    // ─── Triple Top ───
+    if enTT and array.size(pivHPrice) >= 3
+        float p3 = array.get(pivHPrice, 0)
+        float p2 = array.get(pivHPrice, 1)
+        float p1 = array.get(pivHPrice, 2)
+        int   b3 = array.get(pivHBar, 0)
+        int   b2 = array.get(pivHBar, 1)
+        int   b1 = array.get(pivHBar, 2)
+        if b3 - b1 >= minBars and b3 - b1 <= maxBars and bar_index - b3 <= maxBars and f_near(p1, p2, 1.0) and f_near(p2, p3, 1.0) and f_near(p1, p3, 1.5)
+            [neck, neckB] = f_lowestLow(b1, b3)
+            float height = (p1 + p2 + p3) / 3.0 - neck
+            if height / neck * 100.0 >= tolPct
+                float target = neck - height
+                bool reached = f_reachedBear(target, b3)
+                if f_show(reached)
+                    f_line(b1, p1, b2, p2, COL_BEAR, line.style_solid)
+                    f_line(b2, p2, b3, p3, COL_BEAR, line.style_solid)
+                    f_line(b1, neck, b3 + 8, neck, COL_BEAR, line.style_dashed)
+                    f_label(b3, p3, NM_TT, false)
+                    f_target(target, b3, reached)
+                    f_note(NM_TT, reached)
+
+    // ─── Triple Bottom ───
+    if enTB and array.size(pivLPrice) >= 3
+        float p3 = array.get(pivLPrice, 0)
+        float p2 = array.get(pivLPrice, 1)
+        float p1 = array.get(pivLPrice, 2)
+        int   b3 = array.get(pivLBar, 0)
+        int   b2 = array.get(pivLBar, 1)
+        int   b1 = array.get(pivLBar, 2)
+        if b3 - b1 >= minBars and b3 - b1 <= maxBars and bar_index - b3 <= maxBars and f_near(p1, p2, 1.0) and f_near(p2, p3, 1.0) and f_near(p1, p3, 1.5)
+            [neck, neckB] = f_highestHigh(b1, b3)
+            float height = neck - (p1 + p2 + p3) / 3.0
+            if height / neck * 100.0 >= tolPct
+                float target = neck + height
+                bool reached = f_reachedBull(target, b3)
+                if f_show(reached)
+                    f_line(b1, p1, b2, p2, COL_BULL, line.style_solid)
+                    f_line(b2, p2, b3, p3, COL_BULL, line.style_solid)
+                    f_line(b1, neck, b3 + 8, neck, COL_BULL, line.style_dashed)
+                    f_label(b3, p3, NM_TB, true)
+                    f_target(target, b3, reached)
+                    f_note(NM_TB, reached)
+
+    // ─── Head & Shoulders ───
+    if enHS and array.size(pivHPrice) >= 3
+        float rsP = array.get(pivHPrice, 0)
+        float hdP = array.get(pivHPrice, 1)
+        float lsP = array.get(pivHPrice, 2)
+        int   rsB = array.get(pivHBar, 0)
+        int   hdB = array.get(pivHBar, 1)
+        int   lsB = array.get(pivHBar, 2)
+        if rsB - lsB >= minBars and rsB - lsB <= maxBars and bar_index - rsB <= maxBars and hdP > math.max(lsP, rsP) * (1.0 + tolPct / 100.0) and f_near(lsP, rsP, 3.0)
+            [n1, n1B] = f_lowestLow(lsB, hdB)
+            [n2, n2B] = f_lowestLow(hdB, rsB)
+            if f_near(n1, n2, 4.0)
+                float nl = (n1 + n2) / 2.0
+                if nl < math.min(lsP, rsP)
+                    float target = nl - (hdP - nl)
+                    bool reached = f_reachedBear(target, rsB)
+                    if f_show(reached)
+                        f_line(lsB, lsP, hdB, hdP, COL_BEAR, line.style_solid)
+                        f_line(hdB, hdP, rsB, rsP, COL_BEAR, line.style_solid)
+                        f_line(lsB, nl, rsB + 8, nl, COL_BEAR, line.style_dashed)
+                        f_label(hdB, hdP, NM_HS, false)
+                        f_target(target, rsB, reached)
+                        f_note(NM_HS, reached)
+
+    // ─── Inverse Head & Shoulders ───
+    if enIHS and array.size(pivLPrice) >= 3
+        float rsP = array.get(pivLPrice, 0)
+        float hdP = array.get(pivLPrice, 1)
+        float lsP = array.get(pivLPrice, 2)
+        int   rsB = array.get(pivLBar, 0)
+        int   hdB = array.get(pivLBar, 1)
+        int   lsB = array.get(pivLBar, 2)
+        if rsB - lsB >= minBars and rsB - lsB <= maxBars and bar_index - rsB <= maxBars and hdP < math.min(lsP, rsP) * (1.0 - tolPct / 100.0) and f_near(lsP, rsP, 3.0)
+            [n1, n1B] = f_highestHigh(lsB, hdB)
+            [n2, n2B] = f_highestHigh(hdB, rsB)
+            if f_near(n1, n2, 4.0)
+                float nl = (n1 + n2) / 2.0
+                if nl > math.max(lsP, rsP)
+                    float target = nl + (nl - hdP)
+                    bool reached = f_reachedBull(target, rsB)
+                    if f_show(reached)
+                        f_line(lsB, lsP, hdB, hdP, COL_BULL, line.style_solid)
+                        f_line(hdB, hdP, rsB, rsP, COL_BULL, line.style_solid)
+                        f_line(lsB, nl, rsB + 8, nl, COL_BULL, line.style_dashed)
+                        f_label(hdB, hdP, NM_IHS, true)
+                        f_target(target, rsB, reached)
+                        f_note(NM_IHS, reached)
+
+    // ─── Rising Wedge ───
+    if enRW and not na(ch)
+        if ch.hs > 0 and ch.ls > ch.hs and ch.h0 > 0 and ch.hE > 0 and ch.lastB - ch.fb >= minBars
+            float target = f_lo(ch, ch.fb)
+            bool reached = f_reachedBear(target, ch.lastB)
+            if f_show(reached)
+                f_drawChan(ch, COL_BEAR)
+                f_label(ch.lastB, f_up(ch, ch.lastB), NM_RW, false)
+                f_target(target, ch.lastB, reached)
+                f_note(NM_RW, reached)
+
+    // ─── Falling Wedge ───
+    if enFW and not na(ch)
+        if ch.hs < 0 and ch.ls < 0 and ch.hs < ch.ls and ch.h0 > 0 and ch.hE > 0 and ch.lastB - ch.fb >= minBars
+            float target = f_up(ch, ch.fb)
+            bool reached = f_reachedBull(target, ch.lastB)
+            if f_show(reached)
+                f_drawChan(ch, COL_BULL)
+                f_label(ch.lastB, f_lo(ch, ch.lastB), NM_FW, true)
+                f_target(target, ch.lastB, reached)
+                f_note(NM_FW, reached)
+
+    // ─── Triangle ───
+    if enTri and not na(ch)
+        bool flatHi = f_near(ch.h1, ch.h2, 2.0)
+        bool flatLo = f_near(ch.l1, ch.l2, 2.0)
+        if ch.hs <= 0 and ch.ls >= 0 and not (flatHi and flatLo) and ch.h0 > 0 and ch.hE > 0 and ch.hE < ch.h0 * 0.85 and ch.lastB - ch.fb >= minBars
+            bool isBull = close > (ch.h2 + ch.l2) / 2.0
+            float target = isBull ? f_up(ch, ch.lastB) + ch.h0 : f_lo(ch, ch.lastB) - ch.h0
+            bool reached = isBull ? f_reachedBull(target, ch.lastB) : f_reachedBear(target, ch.lastB)
+            if f_show(reached)
+                f_drawChan(ch, f_col(isBull))
+                f_label(ch.lastB, isBull ? f_lo(ch, ch.lastB) : f_up(ch, ch.lastB), NM_TRI, isBull)
+                f_target(target, ch.lastB, reached)
+                f_note(NM_TRI, reached)
+
+    // ─── Rectangle ───
+    if enRect and not na(ch)
+        if f_near(ch.h1, ch.h2, 2.0) and f_near(ch.l1, ch.l2, 2.0) and ch.lastB - ch.fb >= minBars
+            float avgH = (ch.h1 + ch.h2) / 2.0
+            float avgL = (ch.l1 + ch.l2) / 2.0
+            float rh   = avgH - avgL
+            if rh > 0 and rh / avgL * 100.0 >= tolPct * 2
+                bool isBull = close > (avgH + avgL) / 2.0
+                float target = isBull ? avgH + rh : avgL - rh
+                bool reached = isBull ? f_reachedBull(target, ch.lastB) : f_reachedBear(target, ch.lastB)
+                if f_show(reached)
+                    f_box(ch.fb, avgH, ch.lastB + 3, avgL, f_col(isBull))
+                    f_label(ch.lastB, isBull ? avgL : avgH, NM_RECT, isBull)
+                    f_target(target, ch.lastB, reached)
+                    f_note(NM_RECT, reached)
+
+    // ─── Flags & Pennants ───
+    if enBF
+        f_flag(ch, true, false)
+    if enEF
+        f_flag(ch, false, false)
+    if enBP
+        f_flag(ch, true, true)
+    if enEP
+        f_flag(ch, false, true)
+
+    // ─── Cup & Handle / Inverted ───
+    if enCH
+        bool chDone = false
+        for L in array.from(maxBars, math.round(maxBars * 0.65), math.round(maxBars * 0.4))
+            if not chDone and L >= minBars * 2
+                chDone := f_cup(false, L)
+    if enICH
+        bool ichDone = false
+        for L in array.from(maxBars, math.round(maxBars * 0.65), math.round(maxBars * 0.4))
+            if not ichDone and L >= minBars * 2
+                ichDone := f_cup(true, L)
+
+    // ─── In-progress (emerging) markers ───
+    if inProgress
+        if array.size(pivHPrice) >= 1 and not array.includes(gNames, NM_DT)
+            float pP = array.get(pivHPrice, 0)
+            int   pB = array.get(pivHBar, 0)
+            int   age = bar_index - pB
+            if age >= minBars and age <= maxBars and f_near(high, pP, 2.0)
+                [pullLow, pullB] = f_lowestLow(pB, bar_index)
+                if (pP - pullLow) / pP * 100.0 >= tolPct * 2
+                    f_label(bar_index, high, "DT?", false)
+        if array.size(pivLPrice) >= 1 and not array.includes(gNames, NM_DB)
+            float pP = array.get(pivLPrice, 0)
+            int   pB = array.get(pivLBar, 0)
+            int   age = bar_index - pB
+            if age >= minBars and age <= maxBars and f_near(low, pP, 2.0)
+                [pullHigh, pullB] = f_highestHigh(pB, bar_index)
+                if (pullHigh - pP) / pP * 100.0 >= tolPct * 2
+                    f_label(bar_index, low, "DB?", true)
+
+    // ─── Status table ───
+    table.clear(tbl, 0, 0, 1, 19)
+    int n = array.size(gNames)
+    if n > 0
+        table.cell(tbl, 0, 0, "Pattern", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 0, "Status",  text_color = color.white, text_size = size.small)
+        for i = 0 to math.min(n, 19) - 1
+            string st = array.get(gStat, i)
+            table.cell(tbl, 0, i + 1, array.get(gNames, i), text_color = color.white, text_size = size.tiny)
+            table.cell(tbl, 1, i + 1, st, text_color = st == "Reached" ? color.orange : color.white, text_size = size.tiny)
+
+// ───────────────────────── ALERTS ─────────────────────────
+// Fire the first time a pattern appears on the live chart
+bool detDT   = array.includes(gNames, NM_DT)
+bool detDB   = array.includes(gNames, NM_DB)
+bool detTT   = array.includes(gNames, NM_TT)
+bool detTB   = array.includes(gNames, NM_TB)
+bool detHS   = array.includes(gNames, NM_HS)
+bool detIHS  = array.includes(gNames, NM_IHS)
+bool detRW   = array.includes(gNames, NM_RW)
+bool detFW   = array.includes(gNames, NM_FW)
+bool detTri  = array.includes(gNames, NM_TRI)
+bool detRect = array.includes(gNames, NM_RECT)
+bool detBF   = array.includes(gNames, NM_BF)
+bool detEF   = array.includes(gNames, NM_EF)
+bool detBP   = array.includes(gNames, NM_BP)
+bool detEP   = array.includes(gNames, NM_EP)
+bool detCH   = array.includes(gNames, NM_CH)
+bool detICH  = array.includes(gNames, NM_ICH)
+
+alertcondition(detDT   and not detDT[1],   "Double Top Detected",       "Double Top pattern detected")
+alertcondition(detDB   and not detDB[1],   "Double Bottom Detected",    "Double Bottom pattern detected")
+alertcondition(detTT   and not detTT[1],   "Triple Top Detected",       "Triple Top pattern detected")
+alertcondition(detTB   and not detTB[1],   "Triple Bottom Detected",    "Triple Bottom pattern detected")
+alertcondition(detHS   and not detHS[1],   "H&S Detected",              "Head & Shoulders pattern detected")
+alertcondition(detIHS  and not detIHS[1],  "Inv H&S Detected",          "Inverse Head & Shoulders pattern detected")
+alertcondition(detRW   and not detRW[1],   "Rising Wedge Detected",     "Rising Wedge pattern detected")
+alertcondition(detFW   and not detFW[1],   "Falling Wedge Detected",    "Falling Wedge pattern detected")
+alertcondition(detTri  and not detTri[1],  "Triangle Detected",         "Triangle pattern detected")
+alertcondition(detRect and not detRect[1], "Rectangle Detected",        "Rectangle pattern detected")
+alertcondition(detBF   and not detBF[1],   "Bull Flag Detected",        "Bullish Flag pattern detected")
+alertcondition(detEF   and not detEF[1],   "Bear Flag Detected",        "Bearish Flag pattern detected")
+alertcondition(detBP   and not detBP[1],   "Bull Pennant Detected",     "Bullish Pennant pattern detected")
+alertcondition(detEP   and not detEP[1],   "Bear Pennant Detected",     "Bearish Pennant pattern detected")
+alertcondition(detCH   and not detCH[1],   "Cup & Handle Detected",     "Cup and Handle pattern detected")
+alertcondition(detICH  and not detICH[1],  "Inv Cup & Handle Detected", "Inverted Cup and Handle pattern detected")
+
+// End of script
