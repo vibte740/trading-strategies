@@ -1,0 +1,801 @@
+//@version=6
+// ══════════════════════════════════════════════════════════
+// SATS Webhook - Self-Aware Trend System, Binance Futures payload
+// Alert JSON matches the "Long/Short Visual Drawer + Auto Webhook" format:
+// {secret, exchange, symbol, side, leverage, entry, sl, tp1, tp2, qty}
+// ══════════════════════════════════════════════════════════
+indicator(
+     title            = "SATS Webhook (Binance Futures)",
+     shorttitle       = "SATS-WH",
+     overlay          = true,
+     max_lines_count  = 500,
+     max_labels_count = 500,
+     max_boxes_count  = 100,
+     max_bars_back    = 5000)
+
+// ── Group names ───────────────────────────────────────────
+GRP_MAIN   = "⚙️ Main Settings"
+GRP_ADAPT  = "🧠 Adaptive Engine"
+GRP_TQI    = "📐 Trend Quality Engine"
+GRP_RISK   = "🎯 Risk Management"
+GRP_DYN_TP = "🎯 Dynamic TP Settings"
+GRP_LEARN  = "🤖 Self-Learning"
+GRP_VISUAL = "🎨 Visual"
+GRP_DASH   = "📊 Dashboard"
+GRP_WEB    = "🔔 Webhook"
+GRP_WT     = "〰️ WaveTrend Filter"
+GRP_COLORS = "🎨 Colors"
+
+// ── Constants ─────────────────────────────────────────────
+WARMUP_FLOOR     = 50
+MAX_HISTORY_SIGS = 100
+HIT_COLOR_HEX    = #40E0D0
+ER_LOW_THRESH    = 0.25
+ER_HIGH_THRESH   = 0.50
+VOL_LOW_THRESH   = 0.7
+VOL_HIGH_THRESH  = 1.3
+EWMA_ALPHA       = 0.2
+MULT_SMOOTH_ALPHA = 0.15
+
+// ══════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════
+presetInput   = input.string("Auto", "Preset", options = ["Auto", "Custom", "Scalping", "Default", "Swing", "Crypto 24/7"], group = GRP_MAIN)
+atrLenInput   = input.int(13, "ATR Length (Custom)", minval = 5, maxval = 100, group = GRP_MAIN)
+baseMultInput = input.float(2.0, "Base Band Width xATR (Custom)", minval = 0.5, maxval = 5.0, step = 0.1, group = GRP_MAIN)
+sourceInput   = input.source(close, "Source", group = GRP_MAIN)
+
+useAdaptiveInput    = input.bool(true, "Enable Vol-Adaptive Bands (legacy ER)", group = GRP_ADAPT)
+erLengthInput       = input.int(20, "Efficiency Window (Custom)", minval = 5, maxval = 100, group = GRP_ADAPT)
+adaptStrengthInput  = input.float(0.5, "Adaptation Strength", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_ADAPT)
+atrBaselineLenInput = input.int(100, "ATR Baseline Length", minval = 20, maxval = 500, group = GRP_ADAPT)
+
+useTqiInput          = input.bool(true, "Enable Trend Quality Engine", group = GRP_TQI)
+qualityStrengthInput = input.float(0.4, "Quality Influence", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+qualityCurveInput    = input.float(1.5, "Quality Curve Power", minval = 1.0, maxval = 3.0, step = 0.1, group = GRP_TQI)
+multSmoothInput      = input.bool(true, "Smooth Adaptive Multipliers", group = GRP_TQI)
+useAsymBandsInput    = input.bool(true, "Asymmetric Bands", group = GRP_TQI)
+asymStrengthInput    = input.float(0.5, "Asymmetry Strength", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+useEffAtrInput       = input.bool(true, "Efficiency-Weighted ATR", group = GRP_TQI)
+useCharFlipInput     = input.bool(true, "Character-Flip Detection", group = GRP_TQI)
+charFlipMinAgeInput  = input.int(5, "Char-Flip: Min Trend Age", minval = 1, maxval = 50, group = GRP_TQI)
+charFlipHighInput    = input.float(0.55, "Char-Flip: High TQI", minval = 0.3, maxval = 0.9, step = 0.05, group = GRP_TQI)
+charFlipLowInput     = input.float(0.25, "Char-Flip: Low TQI", minval = 0.0, maxval = 0.5, step = 0.05, group = GRP_TQI)
+tqiWeightErInput     = input.float(0.35, "Weight: Efficiency", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+tqiWeightVolInput    = input.float(0.20, "Weight: Volatility Regime", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+tqiWeightStructInput = input.float(0.25, "Weight: Structure", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+tqiWeightMomInput    = input.float(0.20, "Weight: Momentum Persist", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_TQI)
+tqiStructLenInput    = input.int(20, "Structure Window", minval = 5, maxval = 100, group = GRP_TQI)
+tqiMomLenInput       = input.int(10, "Momentum Persist Window", minval = 3, maxval = 50, group = GRP_TQI)
+volLenInput          = input.int(20, "Volume Z Window", minval = 5, maxval = 100, group = GRP_TQI)
+pivotLenInput        = input.int(3, "Pivot Strength (SL anchor)", minval = 2, maxval = 10, group = GRP_TQI)
+rsiLenInput          = input.int(14, "RSI Length (Custom, display)", minval = 5, maxval = 50, group = GRP_TQI)
+
+showRiskInput  = input.bool(true, "Show TP/SL Levels", group = GRP_RISK)
+slAtrMultInput = input.float(1.5, "SL Buffer xATR (Custom)", minval = 0.3, maxval = 5.0, step = 0.1, group = GRP_RISK)
+tpModeInput    = input.string("Fixed", "TP Mode", options = ["Fixed", "Dynamic"], group = GRP_RISK)
+tp1RInput      = input.float(1.0, "TP1 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+tp2RInput      = input.float(2.0, "TP2 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+tp3RInput      = input.float(3.0, "TP3 (R-multiple, chart only)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+labelOffsetInput = input.int(10, "Label Offset (bars)", minval = 10, maxval = 100, group = GRP_RISK)
+showHitsInput  = input.bool(true, "Mark TP Hits (visual)", group = GRP_RISK)
+tradeMaxAgeInput = input.int(100, "Trade Timeout (bars)", minval = 10, maxval = 500, group = GRP_RISK)
+
+dynTpTqiWeightInput = input.float(0.6, "TQI Influence on TP", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_DYN_TP)
+dynTpVolWeightInput = input.float(0.4, "Volatility Influence on TP", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_DYN_TP)
+dynTpMinScaleInput  = input.float(0.5, "Min TP Scale", minval = 0.2, maxval = 1.0, step = 0.05, group = GRP_DYN_TP)
+dynTpMaxScaleInput  = input.float(2.0, "Max TP Scale", minval = 1.0, maxval = 4.0, step = 0.1, group = GRP_DYN_TP)
+dynTpFloorR1Input   = input.float(0.5, "TP1 Absolute Floor (R)", minval = 0.2, maxval = 2.0, step = 0.1, group = GRP_DYN_TP)
+dynTpCeilR3Input    = input.float(8.0, "TP3 Absolute Ceiling (R)", minval = 2.0, maxval = 20.0, step = 0.5, group = GRP_DYN_TP)
+
+useAutoCalibInput  = input.bool(false, "Enable Auto-Calibration (experimental)", group = GRP_LEARN)
+calibWindowInput   = input.int(20, "Calibration Window", minval = 5, maxval = 100, group = GRP_LEARN)
+calibBadRInput     = input.float(0.0, "Bad-Edge Threshold (R)", minval = -2.0, maxval = 1.0, step = 0.1, group = GRP_LEARN)
+calibGoodRInput    = input.float(0.7, "Good-Edge Threshold (R)", minval = 0.0, maxval = 5.0, step = 0.1, group = GRP_LEARN)
+calibStepQInput    = input.float(0.05, "Quality Step", minval = 0.01, maxval = 0.3, step = 0.01, group = GRP_LEARN)
+calibCooldownInput = input.int(5, "Calibration Cooldown (signals)", minval = 1, maxval = 50, group = GRP_LEARN)
+calibMinQInput     = input.float(0.1, "Quality Floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_LEARN)
+calibMaxQInput     = input.float(0.9, "Quality Ceiling", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_LEARN)
+resetLearningInput = input.bool(false, "Reset Learning Memory", group = GRP_LEARN)
+
+themeInput         = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = GRP_VISUAL)
+showBandsInput     = input.bool(true, "Show SuperTrend Bands", group = GRP_VISUAL)
+showTqiColorInput  = input.bool(true, "Color Line by TQI", group = GRP_VISUAL)
+showSignalsInput   = input.bool(true, "Show Signal Labels", group = GRP_VISUAL)
+showBgInput        = input.bool(false, "Show Trend Background", group = GRP_VISUAL)
+
+showDashInput = input.bool(true, "Show Dashboard", group = GRP_DASH)
+showPerfInput = input.bool(true, "Show Performance Stats", group = GRP_DASH)
+dashPosStr    = input.string("Top Right", "Dashboard Position", options = ["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Middle Right"], group = GRP_DASH)
+
+bullColorInput = input.color(#00E676, "Bull", inline = "c1", group = GRP_COLORS)
+bearColorInput = input.color(#FF5252, "Bear", inline = "c1", group = GRP_COLORS)
+slColorInput   = input.color(#FF1744, "SL",   inline = "c2", group = GRP_COLORS)
+tpColorInput   = input.color(#00E676, "TP",   inline = "c2", group = GRP_COLORS)
+
+// Webhook (same fields as the Long/Short Visual Drawer script)
+enableAlertsInput = input.bool(true, "Enable Webhook Alerts", group = GRP_WEB)
+secretKey         = input.string("PASTE_YOUR_WEBHOOK_SECRET", "Webhook Secret", group = GRP_WEB)
+exchangeInput     = input.string("binance_futures", "Exchange", group = GRP_WEB)
+leverage          = input.int(10, "Leverage", minval = 1, maxval = 125, group = GRP_WEB)
+equity            = input.float(10000, "Account equity", minval = 1, group = GRP_WEB)
+riskPct           = input.float(1.0, "Risk per trade (%)", minval = 0.1, step = 0.1, group = GRP_WEB)
+
+useWtFilterInput  = input.bool(true, "Enable WaveTrend Confirmation", group = GRP_WT, tooltip = "LONG alerts only fire when wt1 > wt2, SHORT only when wt1 < wt2.")
+wtN1Input         = input.int(10, "Channel Length", minval = 1, maxval = 50, group = GRP_WT)
+wtN2Input         = input.int(21, "Average Length", minval = 1, maxval = 100, group = GRP_WT)
+
+// ══════════════════════════════════════════════════════════
+// PRESETS
+// ══════════════════════════════════════════════════════════
+float tfMinutes = timeframe.in_seconds() / 60.0
+
+string resolvedPreset = presetInput
+if presetInput == "Auto"
+    resolvedPreset := tfMinutes <= 5 ? "Scalping" : (tfMinutes <= 240 ? "Default" : "Swing")
+
+int effectiveAtrLen = switch resolvedPreset
+    "Scalping"    => 10
+    "Default"     => 14
+    "Swing"       => 21
+    "Crypto 24/7" => 14
+    => atrLenInput
+
+float effectiveBaseMult = switch resolvedPreset
+    "Scalping"    => 1.5
+    "Default"     => 2.0
+    "Swing"       => 2.5
+    "Crypto 24/7" => 2.8
+    => baseMultInput
+
+int effectiveErLen = switch resolvedPreset
+    "Scalping"    => 14
+    "Default"     => 20
+    "Swing"       => 30
+    "Crypto 24/7" => 20
+    => erLengthInput
+
+int effectiveRsiLen = switch resolvedPreset
+    "Scalping"    => 9
+    "Default"     => 14
+    "Swing"       => 21
+    "Crypto 24/7" => 14
+    => rsiLenInput
+
+float effectiveSlMult = switch resolvedPreset
+    "Scalping"    => 1.0
+    "Default"     => 1.5
+    "Swing"       => 2.0
+    "Crypto 24/7" => 2.5
+    => slAtrMultInput
+
+float fixedTp1R = math.min(tp1RInput, math.min(tp2RInput, tp3RInput))
+float fixedTp3R = math.max(tp1RInput, math.max(tp2RInput, tp3RInput))
+float fixedTp2R = tp1RInput + tp2RInput + tp3RInput - fixedTp1R - fixedTp3R
+
+// ══════════════════════════════════════════════════════════
+// THEME
+// ══════════════════════════════════════════════════════════
+bool isDark = switch themeInput
+    "Dark"  => true
+    "Light" => false
+    => color.r(chart.bg_color) < 128
+
+color TEXT_COLOR    = isDark ? #E0E0E0 : #1A1A1A
+color TEXT_MUTED    = isDark ? #9E9E9E : #757575
+color TEXT_BRIGHT   = isDark ? #FFFFFF : #000000
+color TABLE_BG      = isDark ? color.new(#131722, 5) : color.new(#FFFFFF, 5)
+color TABLE_BORDER  = isDark ? #2A2E39 : #D0D0D0
+color TABLE_ROW_ALT = isDark ? #1C2030 : #F0F4F8
+color HEADER_BG     = #2962FF
+color HEADER_TEXT   = #FFFFFF
+color BULL_BG       = color.new(bullColorInput, 92)
+color BEAR_BG       = color.new(bearColorInput, 92)
+color NEUTRAL_YELLOW = #FFEB3B
+color HIT_COLOR     = HIT_COLOR_HEX
+
+// ══════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════
+safeDiv(float num, float den, float fallback = 0.0) =>
+    den != 0 and not na(num) and not na(den) ? num / den : fallback
+
+clamp(float v, float lo, float hi) =>
+    math.max(lo, math.min(hi, v))
+
+mapClamp(float v, float inLo, float inHi, float outLo, float outHi) =>
+    float t = clamp(safeDiv(v - inLo, inHi - inLo, 0.0), 0.0, 1.0)
+    outLo + t * (outHi - outLo)
+
+mapClampInv(float v, float inLo, float inHi, float outHigh, float outLow) =>
+    float t = clamp(safeDiv(v - inLo, inHi - inLo, 0.0), 0.0, 1.0)
+    outHigh - t * (outHigh - outLow)
+
+calcEfficiencyRatio(float src, int len) =>
+    float change     = math.abs(src - src[len])
+    float volatility = math.sum(math.abs(src - src[1]), len)
+    safeDiv(change, volatility, 0.0)
+
+calcVolumeZ(int len) =>
+    float vMean = ta.sma(volume, len)
+    float vStd  = ta.stdev(volume, len)
+    safeDiv(volume - vMean, vStd, 0.0)
+
+getDashPos(string s) =>
+    switch s
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.middle_right
+
+erBin(float er) =>
+    er < ER_LOW_THRESH ? 0 : (er < ER_HIGH_THRESH ? 1 : 2)
+
+volBin(float vRatio) =>
+    vRatio < VOL_LOW_THRESH ? 0 : (vRatio < VOL_HIGH_THRESH ? 1 : 2)
+
+cellIdx(int eb, int vb) =>
+    eb * 3 + vb
+
+calcRealizedR(bool slHit, bool tp1H, bool tp2H, bool tp3H, float tp1R, float tp2R, float tp3R) =>
+    float realizedR = 0.0
+    if tp3H
+        realizedR := (tp1R + tp2R + tp3R) / 3.0
+    else if slHit
+        float taken     = 0.0
+        float remaining = 1.0
+        if tp1H
+            taken     += (1.0 / 3.0) * tp1R
+            remaining -= 1.0 / 3.0
+        if tp2H
+            taken     += (1.0 / 3.0) * tp2R
+            remaining -= 1.0 / 3.0
+        realizedR := taken - remaining
+    realizedR
+
+calcTimeoutR(bool tp1H, bool tp2H, bool tp3H, float tp1R, float tp2R, float tp3R) =>
+    float taken = 0.0
+    if tp1H
+        taken += (1.0 / 3.0) * tp1R
+    if tp2H
+        taken += (1.0 / 3.0) * tp2R
+    if tp3H
+        taken += (1.0 / 3.0) * tp3R
+    taken
+
+calcDynTpScale(float tqiVal, float volRatioVal, float tqiWeight, float volWeight, float minScale, float maxScale) =>
+    float tqiComp  = clamp(tqiVal, 0.0, 1.0)
+    float volComp  = mapClamp(volRatioVal, 0.5, 2.0, 0.0, 1.0)
+    float wDenom   = (tqiWeight + volWeight) > 0 ? tqiWeight + volWeight : 1.0
+    float rawScale = (tqiComp * tqiWeight + volComp * volWeight) / wDenom
+    minScale + rawScale * (maxScale - minScale)
+
+// ══════════════════════════════════════════════════════════
+// SELF-LEARNING STORAGE
+// ══════════════════════════════════════════════════════════
+var array<float> signalRBuffer = array.new<float>()
+var array<int>   gridCount     = array.new<int>(9, 0)
+var array<float> gridEwmR      = array.new<float>(9, 0.0)
+
+updateGridCell(int idx, float r) =>
+    if idx >= 0 and idx < 9
+        int   c       = array.get(gridCount, idx) + 1
+        float prevEwm = array.get(gridEwmR, idx)
+        float newEwm  = c == 1 ? r : prevEwm * (1.0 - EWMA_ALPHA) + r * EWMA_ALPHA
+        array.set(gridCount, idx, c)
+        array.set(gridEwmR, idx, newEwm)
+
+calcRollingStats(int window) =>
+    int n = array.size(signalRBuffer)
+    float winRt = 0.0
+    float avgR  = 0.0
+    float minRun = 0.0
+    if n > 0
+        int startIdx = math.max(0, n - window)
+        float sumR = 0.0
+        int wins = 0
+        float runningR = 0.0
+        for i = startIdx to n - 1
+            float r = array.get(signalRBuffer, i)
+            sumR += r
+            if r > 0
+                wins += 1
+            runningR += r
+            if runningR < minRun
+                minRun := runningR
+        int cnt = n - startIdx
+        winRt := cnt > 0 ? float(wins) / float(cnt) : 0.0
+        avgR  := cnt > 0 ? sumR / float(cnt) : 0.0
+    [winRt, avgR, minRun]
+
+// ══════════════════════════════════════════════════════════
+// BASE CALCULATIONS
+// ══════════════════════════════════════════════════════════
+int warmupBars = math.max(WARMUP_FLOOR, math.max(effectiveAtrLen, math.max(effectiveErLen, math.max(effectiveRsiLen, math.max(volLenInput, math.max(pivotLenInput * 2 + 1, math.max(tqiMomLenInput, tqiStructLenInput)))))) + 10)
+bool isWarmedUp = bar_index >= warmupBars
+
+float rawAtr      = nz(ta.atr(effectiveAtrLen), 0.0)
+float atrBaseline = nz(ta.sma(rawAtr, atrBaselineLenInput), rawAtr)
+float volRatio    = safeDiv(rawAtr, atrBaseline, 1.0)
+float erValue     = calcEfficiencyRatio(close, effectiveErLen)
+float atrValue    = useEffAtrInput ? rawAtr * (0.5 + 0.5 * erValue) : rawAtr
+float rsiVal      = nz(ta.rsi(close, effectiveRsiLen), 50.0)
+
+// ── WaveTrend ─────────────────────────────────────────────
+float wtAp  = hlc3
+float wtEsa = ta.ema(wtAp, wtN1Input)
+float wtD   = ta.ema(math.abs(wtAp - wtEsa), wtN1Input)
+float wtCi  = safeDiv(wtAp - wtEsa, 0.015 * wtD, 0.0)
+float wt1   = ta.ema(wtCi, wtN2Input)
+float wt2   = ta.sma(wt1, 4)
+bool wtBullish = wt1 > wt2
+bool wtBearish = wt1 < wt2
+
+// ── Trend Quality Index ───────────────────────────────────
+float tqiEr = clamp(erValue, 0.0, 1.0)
+
+bool  hasVolume = nz(volume, 0) > 0
+float volZRaw   = calcVolumeZ(volLenInput)
+float tqiVol    = hasVolume ? mapClamp(volZRaw, -1.0, 2.0, 0.0, 1.0) : mapClamp(volRatio, 0.6, 1.8, 0.0, 1.0)
+
+float structHi  = ta.highest(high, tqiStructLenInput)
+float structLo  = ta.lowest(low, tqiStructLenInput)
+float pricePos  = safeDiv(close - structLo, structHi - structLo, 0.5)
+float tqiStruct = clamp(math.abs(pricePos - 0.5) * 2.0, 0.0, 1.0)
+
+float windowChange = close - close[tqiMomLenInput]
+int alignedBars = 0
+for i = 0 to tqiMomLenInput - 1
+    float barChange = close[i] - close[i + 1]
+    if (windowChange > 0 and barChange > 0) or (windowChange < 0 and barChange < 0)
+        alignedBars += 1
+float tqiMom = float(alignedBars) / float(tqiMomLenInput)
+
+float tqiWSum = tqiWeightErInput + tqiWeightVolInput + tqiWeightStructInput + tqiWeightMomInput
+float tqiWeightDenom = tqiWSum > 0 ? tqiWSum : 1.0
+float tqiRaw = useTqiInput ? (tqiEr * tqiWeightErInput + tqiVol * tqiWeightVolInput + tqiStruct * tqiWeightStructInput + tqiMom * tqiWeightMomInput) / tqiWeightDenom : 0.5
+float tqi    = clamp(tqiRaw, 0.0, 1.0)
+
+// ── Adaptive multipliers ──────────────────────────────────
+float legacyAdaptFactor = useAdaptiveInput ? (1.0 + adaptStrengthInput * (0.5 - erValue)) : 1.0
+var float effectiveQualityStrength = qualityStrengthInput
+
+float qualityDeviation = useTqiInput ? math.pow(1.0 - tqi, qualityCurveInput) : 0.5
+float tqiMult = 1.0 - effectiveQualityStrength + effectiveQualityStrength * (0.6 + 0.8 * qualityDeviation)
+float symMult = effectiveBaseMult * legacyAdaptFactor * tqiMult
+
+float activeMultRaw  = symMult
+float passiveMultRaw = symMult
+if useTqiInput and useAsymBandsInput
+    activeMultRaw  := symMult * (1.0 - asymStrengthInput * tqi * 0.3)
+    passiveMultRaw := symMult * (1.0 + asymStrengthInput * tqi * 0.4)
+
+var float activeMultSm  = na
+var float passiveMultSm = na
+activeMultSm  := na(activeMultSm[1])  ? activeMultRaw  : (multSmoothInput ? activeMultSm[1]  * (1.0 - MULT_SMOOTH_ALPHA) + activeMultRaw  * MULT_SMOOTH_ALPHA : activeMultRaw)
+passiveMultSm := na(passiveMultSm[1]) ? passiveMultRaw : (multSmoothInput ? passiveMultSm[1] * (1.0 - MULT_SMOOTH_ALPHA) + passiveMultRaw * MULT_SMOOTH_ALPHA : passiveMultRaw)
+
+// ── Adaptive SuperTrend ───────────────────────────────────
+var float lowerBand = na
+var float upperBand = na
+var int   stTrend   = 1
+
+int prevTrend = na(stTrend[1]) ? 1 : stTrend[1]
+
+float lowerMult    = prevTrend == 1 ? activeMultSm : passiveMultSm
+float upperMult    = prevTrend == 1 ? passiveMultSm : activeMultSm
+float lowerBandRaw = sourceInput - lowerMult * atrValue
+float upperBandRaw = sourceInput + upperMult * atrValue
+
+lowerBand := na(lowerBand[1]) ? lowerBandRaw : (close[1] > lowerBand[1] ? math.max(lowerBandRaw, lowerBand[1]) : lowerBandRaw)
+upperBand := na(upperBand[1]) ? upperBandRaw : (close[1] < upperBand[1] ? math.min(upperBandRaw, upperBand[1]) : upperBandRaw)
+
+bool priceFlipUp   = prevTrend == -1 and close > upperBand[1]
+bool priceFlipDown = prevTrend == 1 and close < lowerBand[1]
+
+var int trendStartBar = 0
+int trendAge = bar_index - trendStartBar
+
+float prevTqi = nz(tqi[1], 0.5)
+bool charFlipCondBase = useCharFlipInput and useTqiInput and prevTqi > charFlipHighInput and tqi < charFlipLowInput and trendAge >= charFlipMinAgeInput
+bool charFlipDown = charFlipCondBase and prevTrend == 1 and close < sourceInput
+bool charFlipUp   = charFlipCondBase and prevTrend == -1 and close > sourceInput
+
+bool finalFlipUp   = priceFlipUp or charFlipUp
+bool finalFlipDown = priceFlipDown or charFlipDown
+
+stTrend := na(stTrend[1]) ? 1 : (finalFlipUp ? 1 : (finalFlipDown ? -1 : prevTrend))
+
+if stTrend != prevTrend
+    trendStartBar := bar_index
+
+float stLine = stTrend == 1 ? lowerBand : upperBand
+bool flipUp   = stTrend == 1 and stTrend[1] == -1
+bool flipDown = stTrend == -1 and stTrend[1] == 1
+
+// ── Dynamic TP R-multiples ────────────────────────────────
+bool  useDynTp = tpModeInput == "Dynamic"
+float dynScale = useDynTp ? calcDynTpScale(tqi, volRatio, dynTpTqiWeightInput, dynTpVolWeightInput, dynTpMinScaleInput, dynTpMaxScaleInput) : 1.0
+
+float tp1Floor = dynTpFloorR1Input
+float tp2Floor = dynTpFloorR1Input * (fixedTp2R / math.max(fixedTp1R, 0.01))
+float tp3Floor = dynTpFloorR1Input * (fixedTp3R / math.max(fixedTp1R, 0.01))
+float effTp1R  = useDynTp ? clamp(fixedTp1R * dynScale, tp1Floor, dynTpCeilR3Input) : fixedTp1R
+float effTp2R  = useDynTp ? clamp(fixedTp2R * dynScale, tp2Floor, dynTpCeilR3Input) : fixedTp2R
+float effTp3R  = useDynTp ? clamp(fixedTp3R * dynScale, tp3Floor, dynTpCeilR3Input) : fixedTp3R
+
+float liveTp1R = math.min(effTp1R, math.min(effTp2R, effTp3R))
+float liveTp3R = math.max(effTp1R, math.max(effTp2R, effTp3R))
+float liveTp2R = effTp1R + effTp2R + effTp3R - liveTp1R - liveTp3R
+
+// ── Pivots (SL anchor) ────────────────────────────────────
+float pivotHigh = ta.pivothigh(high, pivotLenInput, pivotLenInput)
+float pivotLow  = ta.pivotlow(low, pivotLenInput, pivotLenInput)
+var float lastPivotHigh = na
+var float lastPivotLow  = na
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+// ── Learning state ────────────────────────────────────────
+var float allTimeCumR   = 0.0
+var float allTimePeak   = 0.0
+var float allTimeTrough = 0.0
+var int   allTimeCount  = 0
+var int   curWinStreak  = 0
+var int   curLossStreak = 0
+var int   maxWinStreak  = 0
+var int   maxLossStreak = 0
+var int   signalsSinceCalib = 0
+
+if resetLearningInput and not resetLearningInput[1]
+    array.clear(signalRBuffer)
+    for i = 0 to 8
+        array.set(gridCount, i, 0)
+        array.set(gridEwmR, i, 0.0)
+    effectiveQualityStrength := qualityStrengthInput
+    allTimeCumR   := 0.0
+    allTimePeak   := 0.0
+    allTimeTrough := 0.0
+    allTimeCount  := 0
+    curWinStreak  := 0
+    curLossStreak := 0
+    maxWinStreak  := 0
+    maxLossStreak := 0
+    signalsSinceCalib := 0
+
+if not useAutoCalibInput
+    effectiveQualityStrength := qualityStrengthInput
+
+int curCellIdx = cellIdx(erBin(erValue), volBin(volRatio))
+int   curRegimeCount = array.get(gridCount, curCellIdx)
+float curRegimeEdge  = array.get(gridEwmR, curCellIdx)
+
+// ══════════════════════════════════════════════════════════
+// SIGNALS
+// ══════════════════════════════════════════════════════════
+bool confirmedBuy  = flipUp and barstate.isconfirmed and isWarmedUp
+bool confirmedSell = flipDown and barstate.isconfirmed and isWarmedUp
+
+bool satsBuyGated  = confirmedBuy and (not useWtFilterInput or wtBullish)
+bool satsSellGated = confirmedSell and (not useWtFilterInput or wtBearish)
+
+// ══════════════════════════════════════════════════════════
+// ACTIVE TRADE STATE
+// ══════════════════════════════════════════════════════════
+var int   tradeDir      = 0
+var int   tradeEntryBar = 0
+var float tradeEntry    = na
+var float tradeSl       = na
+var float tradeTp1      = na
+var float tradeTp2      = na
+var float tradeTp3      = na
+var float tradeTp1R     = na
+var float tradeTp2R     = na
+var float tradeTp3R     = na
+var bool  hitTp1        = false
+var bool  hitTp2        = false
+var bool  hitTp3        = false
+var int   tradeCellIdx  = -1
+var int   lastDisplaySide = 0
+var int   lastSignalBar   = 0
+
+if confirmedBuy
+    float tEntry = close
+    float slBase = not na(lastPivotLow) ? lastPivotLow : low
+    float tSl    = math.min(slBase - effectiveSlMult * atrValue, tEntry - effectiveSlMult * atrValue)
+    float riskD  = tEntry - tSl
+    tradeDir      := 1
+    tradeEntryBar := bar_index
+    tradeEntry    := tEntry
+    tradeSl       := tSl
+    tradeTp1      := tEntry + riskD * liveTp1R
+    tradeTp2      := tEntry + riskD * liveTp2R
+    tradeTp3      := tEntry + riskD * liveTp3R
+    tradeTp1R     := liveTp1R
+    tradeTp2R     := liveTp2R
+    tradeTp3R     := liveTp3R
+    hitTp1 := false
+    hitTp2 := false
+    hitTp3 := false
+    tradeCellIdx := curCellIdx
+    lastDisplaySide := 1
+    lastSignalBar   := bar_index
+
+if confirmedSell
+    float tEntry = close
+    float slBase = not na(lastPivotHigh) ? lastPivotHigh : high
+    float tSl    = math.max(slBase + effectiveSlMult * atrValue, tEntry + effectiveSlMult * atrValue)
+    float riskD  = tSl - tEntry
+    tradeDir      := -1
+    tradeEntryBar := bar_index
+    tradeEntry    := tEntry
+    tradeSl       := tSl
+    tradeTp1      := tEntry - riskD * liveTp1R
+    tradeTp2      := tEntry - riskD * liveTp2R
+    tradeTp3      := tEntry - riskD * liveTp3R
+    tradeTp1R     := liveTp1R
+    tradeTp2R     := liveTp2R
+    tradeTp3R     := liveTp3R
+    hitTp1 := false
+    hitTp2 := false
+    hitTp3 := false
+    tradeCellIdx := curCellIdx
+    lastDisplaySide := -1
+    lastSignalBar   := bar_index
+
+// ══════════════════════════════════════════════════════════
+// PLOTS & LABELS
+// ══════════════════════════════════════════════════════════
+int lineTransp = showTqiColorInput and useTqiInput ? int(clamp(math.round(mapClampInv(tqi, 0.1, 0.9, 70.0, 0.0)), 0, 100)) : 0
+color stLineColor = stTrend == 1 ? color.new(bullColorInput, lineTransp) : color.new(bearColorInput, lineTransp)
+
+plot(showBandsInput and isWarmedUp ? stLine : na, "SuperTrend", color = stLineColor, linewidth = 2)
+bgcolor(showBgInput and isWarmedUp ? (stTrend == 1 ? BULL_BG : BEAR_BG) : na, title = "Trend Background")
+
+string tpModeTag = useDynTp ? "Dynamic x" + str.tostring(dynScale, "#.00") : "Fixed"
+
+if showSignalsInput and confirmedBuy
+    label.new(bar_index, low, "▲ LONG", color = bullColorInput, textcolor = #FFFFFF, style = label.style_label_up, size = size.small,
+         tooltip = "SATS LONG\nTQI: " + str.tostring(tqi, "#.00") + "\nER: " + str.tostring(erValue, "#.00") + "\nRSI: " + str.tostring(rsiVal, "#.0") + "\nWT1/WT2: " + str.tostring(wt1, "#.00") + " / " + str.tostring(wt2, "#.00") + "\nTP: " + tpModeTag + "\nWebhook sent: " + (satsBuyGated ? "yes" : "no (WT filter)"))
+
+if showSignalsInput and confirmedSell
+    label.new(bar_index, high, "▼ SHORT", color = bearColorInput, textcolor = #FFFFFF, style = label.style_label_down, size = size.small,
+         tooltip = "SATS SHORT\nTQI: " + str.tostring(tqi, "#.00") + "\nER: " + str.tostring(erValue, "#.00") + "\nRSI: " + str.tostring(rsiVal, "#.0") + "\nWT1/WT2: " + str.tostring(wt1, "#.00") + " / " + str.tostring(wt2, "#.00") + "\nTP: " + tpModeTag + "\nWebhook sent: " + (satsSellGated ? "yes" : "no (WT filter)"))
+
+// ── TP/SL lines ───────────────────────────────────────────
+var line  lineEntry = na
+var line  lineSL    = na
+var line  lineTp1   = na
+var line  lineTp2   = na
+var line  lineTp3   = na
+var label lbEntry   = na
+var label lbSL      = na
+var label lbTp1     = na
+var label lbTp2     = na
+var label lbTp3     = na
+
+if showRiskInput
+    if (confirmedBuy or confirmedSell) and not na(tradeSl)
+        line.delete(lineEntry)
+        line.delete(lineSL)
+        line.delete(lineTp1)
+        line.delete(lineTp2)
+        line.delete(lineTp3)
+        label.delete(lbEntry)
+        label.delete(lbSL)
+        label.delete(lbTp1)
+        label.delete(lbTp2)
+        label.delete(lbTp3)
+
+        int lineEnd  = bar_index + labelOffsetInput
+        int labelPos = bar_index + labelOffsetInput + 2
+
+        lineEntry := line.new(bar_index, tradeEntry, lineEnd, tradeEntry, color = color.gray, width = 2)
+        lineSL    := line.new(bar_index, tradeSl, lineEnd, tradeSl, color = slColorInput, width = 2)
+        lineTp1   := line.new(bar_index, tradeTp1, lineEnd, tradeTp1, color = tpColorInput, width = 1, style = line.style_dashed)
+        lineTp2   := line.new(bar_index, tradeTp2, lineEnd, tradeTp2, color = tpColorInput, width = 1, style = line.style_dashed)
+        lineTp3   := line.new(bar_index, tradeTp3, lineEnd, tradeTp3, color = tpColorInput, width = 2, style = line.style_dashed)
+
+        lbEntry := label.new(labelPos, tradeEntry, "ENTRY " + str.tostring(tradeEntry, format.mintick), color = color.new(color.gray, 60), textcolor = TEXT_BRIGHT, style = label.style_label_left, size = size.small)
+        lbSL    := label.new(labelPos, tradeSl, "SL " + str.tostring(tradeSl, format.mintick), color = color.new(slColorInput, 60), textcolor = TEXT_BRIGHT, style = label.style_label_left, size = size.small)
+        lbTp1   := label.new(labelPos, tradeTp1, "TP1 " + str.tostring(tradeTp1, format.mintick), color = color.new(tpColorInput, 60), textcolor = TEXT_BRIGHT, style = label.style_label_left, size = size.small)
+        lbTp2   := label.new(labelPos, tradeTp2, "TP2 " + str.tostring(tradeTp2, format.mintick), color = color.new(tpColorInput, 60), textcolor = TEXT_BRIGHT, style = label.style_label_left, size = size.small)
+        lbTp3   := label.new(labelPos, tradeTp3, "TP3 " + str.tostring(tradeTp3, format.mintick), color = color.new(tpColorInput, 60), textcolor = TEXT_BRIGHT, style = label.style_label_left, size = size.small)
+
+    else if tradeDir != 0 and not na(lineEntry)
+        int newEnd = bar_index + labelOffsetInput
+        int newPos = bar_index + labelOffsetInput + 2
+        line.set_x2(lineEntry, newEnd)
+        line.set_x2(lineSL, newEnd)
+        line.set_x2(lineTp1, newEnd)
+        line.set_x2(lineTp2, newEnd)
+        line.set_x2(lineTp3, newEnd)
+        label.set_x(lbEntry, newPos)
+        label.set_x(lbSL, newPos)
+        label.set_x(lbTp1, newPos)
+        label.set_x(lbTp2, newPos)
+        label.set_x(lbTp3, newPos)
+
+// ══════════════════════════════════════════════════════════
+// HIT DETECTION + LEARNING FEEDBACK
+// ══════════════════════════════════════════════════════════
+if tradeDir != 0 and barstate.isconfirmed and not na(tradeEntry) and not na(tradeSl) and bar_index > tradeEntryBar
+    bool tp1Reached = tradeDir == 1 ? high >= tradeTp1 : low <= tradeTp1
+    bool tp2Reached = tradeDir == 1 ? high >= tradeTp2 : low <= tradeTp2
+    bool tp3Reached = tradeDir == 1 ? high >= tradeTp3 : low <= tradeTp3
+    bool slHit      = tradeDir == 1 ? low <= tradeSl : high >= tradeSl
+    bool timeoutHit = (bar_index - tradeEntryBar) >= tradeMaxAgeInput
+
+    if tp1Reached and not hitTp1
+        hitTp1 := true
+        if showHitsInput and showRiskInput and not na(lineTp1)
+            line.set_color(lineTp1, HIT_COLOR)
+            line.set_style(lineTp1, line.style_solid)
+            label.set_text(lbTp1, "TP1 ✓ " + str.tostring(tradeTp1, format.mintick))
+            label.set_color(lbTp1, color.new(HIT_COLOR, 40))
+
+    if tp2Reached and not hitTp2
+        hitTp2 := true
+        if showHitsInput and showRiskInput and not na(lineTp2)
+            line.set_color(lineTp2, HIT_COLOR)
+            line.set_style(lineTp2, line.style_solid)
+            label.set_text(lbTp2, "TP2 ✓ " + str.tostring(tradeTp2, format.mintick))
+            label.set_color(lbTp2, color.new(HIT_COLOR, 40))
+
+    if tp3Reached and not hitTp3
+        hitTp3 := true
+        if showHitsInput and showRiskInput and not na(lineTp3)
+            line.set_color(lineTp3, HIT_COLOR)
+            line.set_style(lineTp3, line.style_solid)
+            label.set_text(lbTp3, "TP3 ✓ " + str.tostring(tradeTp3, format.mintick))
+            label.set_color(lbTp3, color.new(HIT_COLOR, 40))
+
+    if hitTp3 or slHit or timeoutHit
+        float useTp1R = nz(tradeTp1R, fixedTp1R)
+        float useTp2R = nz(tradeTp2R, fixedTp2R)
+        float useTp3R = nz(tradeTp3R, fixedTp3R)
+        float realizedR = 0.0
+        if hitTp3 or slHit
+            realizedR := calcRealizedR(slHit, hitTp1, hitTp2, hitTp3, useTp1R, useTp2R, useTp3R)
+        else
+            realizedR := calcTimeoutR(hitTp1, hitTp2, hitTp3, useTp1R, useTp2R, useTp3R)
+        realizedR := clamp(realizedR, -1.0, useTp3R)
+
+        array.push(signalRBuffer, realizedR)
+        while array.size(signalRBuffer) > MAX_HISTORY_SIGS
+            array.shift(signalRBuffer)
+        allTimeCount += 1
+        allTimeCumR  += realizedR
+        if allTimeCumR > allTimePeak
+            allTimePeak := allTimeCumR
+        float curDD = allTimeCumR - allTimePeak
+        if curDD < allTimeTrough
+            allTimeTrough := curDD
+        if realizedR > 0
+            curWinStreak += 1
+            curLossStreak := 0
+            if curWinStreak > maxWinStreak
+                maxWinStreak := curWinStreak
+        else
+            curLossStreak += 1
+            curWinStreak := 0
+            if curLossStreak > maxLossStreak
+                maxLossStreak := curLossStreak
+
+        updateGridCell(tradeCellIdx, realizedR)
+        signalsSinceCalib += 1
+
+        if useAutoCalibInput and array.size(signalRBuffer) >= calibWindowInput and signalsSinceCalib >= calibCooldownInput
+            int n = array.size(signalRBuffer)
+            int startIdx = math.max(0, n - calibWindowInput)
+            float sumR = 0.0
+            for i = startIdx to n - 1
+                sumR += array.get(signalRBuffer, i)
+            float postAvgR = sumR / float(n - startIdx)
+            if postAvgR < calibBadRInput
+                float drift = effectiveQualityStrength > qualityStrengthInput ? -calibStepQInput : calibStepQInput
+                effectiveQualityStrength := clamp(effectiveQualityStrength + drift, calibMinQInput, calibMaxQInput)
+                signalsSinceCalib := 0
+            else if postAvgR > calibGoodRInput
+                signalsSinceCalib := 0
+
+        tradeDir := 0
+        tradeCellIdx := -1
+
+// ══════════════════════════════════════════════════════════
+// WEBHOOK ALERT  (same JSON schema as the Long/Short Drawer)
+// ══════════════════════════════════════════════════════════
+if enableAlertsInput and (satsBuyGated or satsSellGated) and not na(tradeEntry) and not na(tradeSl)
+    float riskDist = math.abs(tradeEntry - tradeSl)
+    float qty      = riskDist > 0 ? equity * riskPct / 100 / riskDist : na
+    bool  okLevels = riskDist > 0 and not na(qty) and (satsBuyGated ? tradeSl < tradeEntry : tradeSl > tradeEntry)
+    if okLevels
+        string sideStr     = satsBuyGated ? "LONG" : "SHORT"
+        string cleanTicker = str.replace_all(syminfo.ticker, ".P", "")
+        string payload = '{' +
+             '"secret":"' + secretKey + '",' +
+             '"exchange":"' + exchangeInput + '",' +
+             '"symbol":"' + cleanTicker + '",' +
+             '"side":"' + sideStr + '",' +
+             '"leverage":' + str.tostring(leverage) + ',' +
+             '"entry":' + str.tostring(tradeEntry, format.mintick) + ',' +
+             '"sl":' + str.tostring(tradeSl, format.mintick) + ',' +
+             '"tp1":' + str.tostring(tradeTp1, format.mintick) + ',' +
+             '"tp2":' + str.tostring(tradeTp2, format.mintick) + ',' +
+             '"qty":' + str.tostring(qty, "#.####") +
+             '}'
+        alert(payload, alert.freq_once_per_bar_close)
+
+alertcondition(satsBuyGated,  title = "SATS LONG",  message = "SATS LONG confirmed - {{ticker}} {{interval}}")
+alertcondition(satsSellGated, title = "SATS SHORT", message = "SATS SHORT confirmed - {{ticker}} {{interval}}")
+
+// ══════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════
+[dashWinRate, dashAvgR, dashWindowDD] = calcRollingStats(calibWindowInput)
+
+if showDashInput and barstate.islast
+    var table t = table.new(getDashPos(dashPosStr), 2, 30, bgcolor = TABLE_BG, border_color = TABLE_BORDER, border_width = 1, frame_color = TABLE_BORDER, frame_width = 1)
+
+    string trendStr  = stTrend == 1 ? "Bullish ▲" : "Bearish ▼"
+    color  trendCol  = stTrend == 1 ? bullColorInput : bearColorInput
+    string regimeStr = erValue >= ER_HIGH_THRESH ? "Trending" : (erValue >= ER_LOW_THRESH ? "Mixed" : "Choppy")
+    color  regimeCol = erValue >= ER_HIGH_THRESH ? bullColorInput : (erValue >= ER_LOW_THRESH ? NEUTRAL_YELLOW : bearColorInput)
+    string volRegStr = volRatio < VOL_LOW_THRESH ? "Low Vol" : (volRatio < VOL_HIGH_THRESH ? "Norm Vol" : "High Vol")
+    color  tqiCol    = tqi > 0.6 ? bullColorInput : (tqi > 0.35 ? NEUTRAL_YELLOW : bearColorInput)
+    color  wtCol     = wtBullish ? bullColorInput : bearColorInput
+    string wtGate    = not useWtFilterInput ? "off" : (wtBullish ? "LONG ok" : "SHORT ok")
+    string liveRStr  = str.tostring(liveTp1R, "#.0") + " / " + str.tostring(liveTp2R, "#.0") + " / " + str.tostring(liveTp3R, "#.0")
+    string warmStr   = isWarmedUp ? "Ready" : str.tostring(warmupBars - bar_index) + " bars"
+
+    int r = 0
+    table.cell(t, 0, r, "SATS Webhook", text_color = HEADER_TEXT, bgcolor = HEADER_BG, text_size = size.small)
+    table.cell(t, 1, r, resolvedPreset, text_color = HEADER_TEXT, bgcolor = HEADER_BG, text_size = size.small)
+    r += 1
+    table.cell(t, 0, r, "Trend", text_color = TEXT_MUTED, text_size = size.small)
+    table.cell(t, 1, r, trendStr, text_color = trendCol, text_size = size.small)
+    r += 1
+    table.cell(t, 0, r, "TQI", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(t, 1, r, useTqiInput ? str.tostring(tqi, "#.00") : "off", text_color = tqiCol, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    r += 1
+    table.cell(t, 0, r, "Regime", text_color = TEXT_MUTED, text_size = size.small)
+    table.cell(t, 1, r, regimeStr + " / " + volRegStr, text_color = regimeCol, text_size = size.small)
+    r += 1
+    table.cell(t, 0, r, "WT1 / WT2", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(t, 1, r, str.tostring(wt1, "#.00") + " / " + str.tostring(wt2, "#.00"), text_color = wtCol, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    r += 1
+    table.cell(t, 0, r, "WT Gate", text_color = TEXT_MUTED, text_size = size.small)
+    table.cell(t, 1, r, wtGate, text_color = TEXT_COLOR, text_size = size.small)
+    r += 1
+    table.cell(t, 0, r, "Live R", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(t, 1, r, liveRStr, text_color = TEXT_COLOR, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    r += 1
+    table.cell(t, 0, r, "Status", text_color = TEXT_MUTED, text_size = size.small)
+    table.cell(t, 1, r, warmStr, text_color = isWarmedUp ? bullColorInput : NEUTRAL_YELLOW, text_size = size.small)
+    r += 1
+
+    if showPerfInput
+        int sigCount = array.size(signalRBuffer)
+        table.cell(t, 0, r, "Performance", text_color = HEADER_TEXT, bgcolor = HEADER_BG, text_size = size.small)
+        table.cell(t, 1, r, str.tostring(sigCount) + "/" + str.tostring(MAX_HISTORY_SIGS), text_color = HEADER_TEXT, bgcolor = HEADER_BG, text_size = size.small)
+        r += 1
+        table.cell(t, 0, r, "Win Rate", text_color = TEXT_MUTED, text_size = size.small)
+        table.cell(t, 1, r, sigCount == 0 ? "—" : str.tostring(dashWinRate * 100, "#.0") + "%", text_color = sigCount < 5 ? TEXT_MUTED : (dashWinRate >= 0.5 ? bullColorInput : bearColorInput), text_size = size.small)
+        r += 1
+        table.cell(t, 0, r, "Avg R", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+        table.cell(t, 1, r, sigCount == 0 ? "—" : str.tostring(dashAvgR, "+#.00;-#.00") + "R", text_color = sigCount < 5 ? TEXT_MUTED : (dashAvgR > 0 ? bullColorInput : bearColorInput), text_size = size.small, bgcolor = TABLE_ROW_ALT)
+        r += 1
+        table.cell(t, 0, r, "Window DD", text_color = TEXT_MUTED, text_size = size.small)
+        table.cell(t, 1, r, sigCount == 0 ? "—" : str.tostring(dashWindowDD, "#.00") + "R", text_color = bearColorInput, text_size = size.small)
+        r += 1
+        table.cell(t, 0, r, "All-Time DD", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+        table.cell(t, 1, r, allTimeCount == 0 ? "—" : str.tostring(allTimeTrough, "#.00") + "R", text_color = bearColorInput, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+        r += 1
+        table.cell(t, 0, r, "Streak W/L", text_color = TEXT_MUTED, text_size = size.small)
+        table.cell(t, 1, r, allTimeCount == 0 ? "—" : "W:" + str.tostring(curWinStreak) + "/" + str.tostring(maxWinStreak) + " L:" + str.tostring(curLossStreak) + "/" + str.tostring(maxLossStreak), text_color = TEXT_COLOR, text_size = size.small)
+        r += 1
+        table.cell(t, 0, r, "Regime Edge", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+        table.cell(t, 1, r, curRegimeCount == 0 ? "—" : str.tostring(curRegimeEdge, "+#.00;-#.00") + "R (" + str.tostring(curRegimeCount) + ")", text_color = curRegimeCount < 5 ? TEXT_MUTED : (curRegimeEdge > 0 ? bullColorInput : bearColorInput), text_size = size.small, bgcolor = TABLE_ROW_ALT)
