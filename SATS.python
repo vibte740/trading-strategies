@@ -1,0 +1,673 @@
+#!/usr/bin/env python3
+"""
+SATS Webhook (Binance Futures) - Python port of the Pine v6 indicator.
+
+Self-Aware Trend System: adaptive SuperTrend + Trend Quality Index (TQI),
+WaveTrend confirmation, R-multiple TP/SL, self-learning stats, and the
+webhook JSON payload for tv-webhook-receiver.
+
+Usage
+-----
+  pip install pandas numpy ccxt requests
+  python sats_webhook.py --symbol BTC/USDT:USDT --timeframe 15m --limit 1500
+  python sats_webhook.py --symbol BTC/USDT:USDT --timeframe 15m --live   # poll closed candles + POST webhook
+
+Notes
+-----
+* Only CLOSED candles are processed (equivalent to barstate.isconfirmed).
+* Secret is read from env SATS_SECRET and URL from SATS_WEBHOOK_URL (not hardcoded).
+* Pine's ta.pivothigh/low tie handling is approximated (ties allowed).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+
+# ── Constants ────────────────────────────────────────────────
+WARMUP_FLOOR = 50
+MAX_HISTORY_SIGS = 100
+ER_LOW, ER_HIGH = 0.25, 0.50
+VOL_LOW, VOL_HIGH = 0.7, 1.3
+EWMA_ALPHA = 0.2
+MULT_SMOOTH_ALPHA = 0.15
+
+
+# ── Config (mirrors Pine inputs) ─────────────────────────────
+@dataclass
+class Config:
+    preset: str = "Auto"  # Auto, Custom, Scalping, Default, Swing, Crypto 24/7
+    atr_len: int = 13
+    base_mult: float = 2.0
+    # adaptive
+    use_adaptive: bool = True
+    er_len: int = 20
+    adapt_strength: float = 0.5
+    atr_baseline_len: int = 100
+    # TQI
+    use_tqi: bool = True
+    quality_strength: float = 0.4
+    quality_curve: float = 1.5
+    mult_smooth: bool = True
+    use_asym: bool = True
+    asym_strength: float = 0.5
+    use_eff_atr: bool = True
+    use_char_flip: bool = True
+    char_flip_min_age: int = 5
+    char_flip_high: float = 0.55
+    char_flip_low: float = 0.25
+    w_er: float = 0.35
+    w_vol: float = 0.20
+    w_struct: float = 0.25
+    w_mom: float = 0.20
+    struct_len: int = 20
+    mom_len: int = 10
+    vol_len: int = 20
+    pivot_len: int = 3
+    rsi_len: int = 14
+    # risk
+    sl_atr_mult: float = 1.5
+    tp_mode: str = "Fixed"  # Fixed / Dynamic
+    tp1_r: float = 1.0
+    tp2_r: float = 2.0
+    tp3_r: float = 3.0
+    trade_max_age: int = 100
+    # dynamic TP
+    dyn_tqi_w: float = 0.6
+    dyn_vol_w: float = 0.4
+    dyn_min_scale: float = 0.5
+    dyn_max_scale: float = 2.0
+    dyn_floor_r1: float = 0.5
+    dyn_ceil_r3: float = 8.0
+    # learning
+    use_auto_calib: bool = False
+    calib_window: int = 20
+    calib_bad_r: float = 0.0
+    calib_good_r: float = 0.7
+    calib_step_q: float = 0.05
+    calib_cooldown: int = 5
+    calib_min_q: float = 0.1
+    calib_max_q: float = 0.9
+    # webhook
+    enable_alerts: bool = True
+    secret: str = field(default_factory=lambda: os.getenv("SATS_SECRET", "CHANGE_ME"))
+    exchange: str = "binance_futures"
+    leverage: int = 10
+    include_qty: bool = False
+    equity: float = 10000.0
+    risk_pct: float = 1.0
+    # WaveTrend
+    use_wt_filter: bool = True
+    wt_n1: int = 10
+    wt_n2: int = 21
+
+
+# ── Helpers ──────────────────────────────────────────────────
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def safe_div(n, d, fb=0.0):
+    if d is None or n is None or d == 0 or math.isnan(n) or math.isnan(d):
+        return fb
+    return n / d
+
+
+def map_clamp(v, in_lo, in_hi, out_lo, out_hi):
+    t = clamp(safe_div(v - in_lo, in_hi - in_lo, 0.0), 0.0, 1.0)
+    return out_lo + t * (out_hi - out_lo)
+
+
+def map_clamp_inv(v, in_lo, in_hi, out_high, out_low):
+    t = clamp(safe_div(v - in_lo, in_hi - in_lo, 0.0), 0.0, 1.0)
+    return out_high - t * (out_high - out_low)
+
+
+def rma(x: np.ndarray, n: int) -> np.ndarray:
+    """Pine ta.rma: SMA-seeded Wilder smoothing (NaN until n bars)."""
+    out = np.full(len(x), np.nan)
+    if len(x) < n:
+        return out
+    out[n - 1] = np.nanmean(x[:n])
+    a = 1.0 / n
+    for i in range(n, len(x)):
+        out[i] = a * x[i] + (1 - a) * out[i - 1]
+    return out
+
+
+def ema(s: pd.Series, n: int) -> pd.Series:
+    return s.ewm(span=n, adjust=False).mean()
+
+
+def tf_minutes(tf: str) -> float:
+    unit = tf[-1]
+    val = float(tf[:-1])
+    return val * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
+
+
+def resolve_preset(cfg: Config, tfm: float) -> dict:
+    p = cfg.preset
+    if p == "Auto":
+        p = "Scalping" if tfm <= 5 else ("Default" if tfm <= 240 else "Swing")
+    table = {
+        "Scalping":    dict(atr=10, mult=1.5, er=14, rsi=9,  sl=1.0),
+        "Default":     dict(atr=14, mult=2.0, er=20, rsi=14, sl=1.5),
+        "Swing":       dict(atr=21, mult=2.5, er=30, rsi=21, sl=2.0),
+        "Crypto 24/7": dict(atr=14, mult=2.8, er=20, rsi=14, sl=2.5),
+    }
+    t = table.get(p, dict(atr=cfg.atr_len, mult=cfg.base_mult, er=cfg.er_len,
+                          rsi=cfg.rsi_len, sl=cfg.sl_atr_mult))
+    t["name"] = p
+    return t
+
+
+def calc_realized_r(sl_hit, t1, t2, t3, r1, r2, r3):
+    if t3:
+        return (r1 + r2 + r3) / 3.0
+    if sl_hit:
+        taken, remaining = 0.0, 1.0
+        if t1:
+            taken += r1 / 3.0
+            remaining -= 1 / 3.0
+        if t2:
+            taken += r2 / 3.0
+            remaining -= 1 / 3.0
+        return taken - remaining
+    return 0.0
+
+
+def calc_timeout_r(t1, t2, t3, r1, r2, r3):
+    return (r1 / 3.0 if t1 else 0) + (r2 / 3.0 if t2 else 0) + (r3 / 3.0 if t3 else 0)
+
+
+def calc_dyn_tp_scale(tqi, vol_ratio, w_t, w_v, mn, mx):
+    tqi_c = clamp(tqi, 0.0, 1.0)
+    vol_c = map_clamp(vol_ratio, 0.5, 2.0, 0.0, 1.0)
+    den = (w_t + w_v) if (w_t + w_v) > 0 else 1.0
+    raw = (tqi_c * w_t + vol_c * w_v) / den
+    return mn + raw * (mx - mn)
+
+
+def er_bin(er):
+    return 0 if er < ER_LOW else (1 if er < ER_HIGH else 2)
+
+
+def vol_bin(v):
+    return 0 if v < VOL_LOW else (1 if v < VOL_HIGH else 2)
+
+
+# ── Results container ────────────────────────────────────────
+@dataclass
+class Signal:
+    time: pd.Timestamp
+    side: str
+    entry: float
+    sl: float
+    tp1: float
+    tp2: float
+    tp3: float
+    tqi: float
+    er: float
+    rsi: float
+    wt1: float
+    wt2: float
+    webhook_sent: bool
+    payload: Optional[str] = None
+
+
+@dataclass
+class ClosedTrade:
+    time: pd.Timestamp
+    side: str
+    r: float
+    reason: str
+
+
+@dataclass
+class Result:
+    df: pd.DataFrame
+    signals: List[Signal]
+    trades: List[ClosedTrade]
+    stats: dict
+    active_trade: Optional[dict]
+
+
+# ── Core engine ──────────────────────────────────────────────
+def run_sats(df: pd.DataFrame, timeframe: str, symbol: str, cfg: Config = Config(),
+             source: str = "close") -> Result:
+    """df: columns open, high, low, close, volume; DatetimeIndex; closed candles only."""
+    df = df.copy()
+    n = len(df)
+    P = resolve_preset(cfg, tf_minutes(timeframe))
+    atr_len, base_mult, er_len, rsi_len, sl_mult = P["atr"], P["mult"], P["er"], P["rsi"], P["sl"]
+
+    h = df["high"].to_numpy(float)
+    l = df["low"].to_numpy(float)
+    c = df["close"].to_numpy(float)
+    v = df["volume"].to_numpy(float)
+    src = df[source].to_numpy(float)
+
+    fixed = sorted([cfg.tp1_r, cfg.tp2_r, cfg.tp3_r])
+    fixed_tp1, fixed_tp2, fixed_tp3 = fixed
+
+    # warmup
+    warmup = max(WARMUP_FLOOR,
+                 max(atr_len, er_len, rsi_len, cfg.vol_len, cfg.pivot_len * 2 + 1,
+                     cfg.mom_len, cfg.struct_len) + 10)
+
+    # ── Vectorised indicators ────────────────────────────────
+    prev_c = np.roll(c, 1)
+    prev_c[0] = np.nan
+    tr = np.maximum.reduce([h - l, np.abs(h - prev_c), np.abs(l - prev_c)])
+    tr[0] = h[0] - l[0]
+    raw_atr = np.nan_to_num(rma(tr, atr_len), nan=0.0)
+    atr_base = pd.Series(raw_atr).rolling(cfg.atr_baseline_len).mean().to_numpy()
+    atr_base = np.where(np.isnan(atr_base), raw_atr, atr_base)
+    vol_ratio = np.array([safe_div(a, b, 1.0) for a, b in zip(raw_atr, atr_base)])
+
+    cs = pd.Series(c)
+    change = (cs - cs.shift(er_len)).abs()
+    volat = cs.diff().abs().rolling(er_len).sum()
+    er = np.array([safe_div(a, b, 0.0) for a, b in zip(change.to_numpy(), volat.to_numpy())])
+    atr_val = raw_atr * (0.5 + 0.5 * er) if cfg.use_eff_atr else raw_atr
+
+    # RSI (display)
+    d = np.diff(c, prepend=np.nan)
+    gain = np.where(np.isnan(d), 0, np.maximum(d, 0))
+    loss = np.where(np.isnan(d), 0, np.maximum(-d, 0))
+    ag, al = rma(gain, rsi_len), rma(loss, rsi_len)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rsi = np.where(al == 0, 100.0, 100 - 100 / (1 + ag / al))
+    rsi = np.nan_to_num(rsi, nan=50.0)
+
+    # WaveTrend
+    ap = pd.Series((h + l + c) / 3.0)
+    esa = ema(ap, cfg.wt_n1)
+    dd = ema((ap - esa).abs(), cfg.wt_n1)
+    ci = ((ap - esa) / (0.015 * dd)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    wt1 = ema(ci, cfg.wt_n2)
+    wt2 = wt1.rolling(4).mean()
+    wt1a, wt2a = wt1.to_numpy(), wt2.to_numpy()
+
+    # TQI components
+    has_volume = np.nan_to_num(v, nan=0.0) > 0
+    vs = pd.Series(v)
+    v_mean = vs.rolling(cfg.vol_len).mean()
+    v_std = vs.rolling(cfg.vol_len).std(ddof=0)
+    vol_z = np.array([safe_div(a - m, s, 0.0) for a, m, s in zip(v, v_mean, v_std)])
+    struct_hi = pd.Series(h).rolling(cfg.struct_len).max().to_numpy()
+    struct_lo = pd.Series(l).rolling(cfg.struct_len).min().to_numpy()
+
+    wsum = cfg.w_er + cfg.w_vol + cfg.w_struct + cfg.w_mom
+    wden = wsum if wsum > 0 else 1.0
+
+    tqi = np.full(n, 0.5)
+    for t in range(n):
+        t_er = clamp(er[t], 0.0, 1.0)
+        t_vol = (map_clamp(vol_z[t], -1.0, 2.0, 0.0, 1.0) if has_volume[t]
+                 else map_clamp(vol_ratio[t], 0.6, 1.8, 0.0, 1.0))
+        pos = safe_div(c[t] - struct_lo[t], struct_hi[t] - struct_lo[t], 0.5)
+        t_struct = clamp(abs(pos - 0.5) * 2.0, 0.0, 1.0)
+        if t >= cfg.mom_len:
+            wc = c[t] - c[t - cfg.mom_len]
+            aligned = 0
+            for i in range(cfg.mom_len):
+                bc = c[t - i] - c[t - i - 1]
+                if (wc > 0 and bc > 0) or (wc < 0 and bc < 0):
+                    aligned += 1
+            t_mom = aligned / cfg.mom_len
+        else:
+            t_mom = 0.0
+        raw = ((t_er * cfg.w_er + t_vol * cfg.w_vol + t_struct * cfg.w_struct + t_mom * cfg.w_mom) / wden
+               if cfg.use_tqi else 0.5)
+        tqi[t] = clamp(raw, 0.0, 1.0)
+
+    # Pivots (confirmed pivot_len bars later)
+    pl = cfg.pivot_len
+    piv_hi = np.full(n, np.nan)
+    piv_lo = np.full(n, np.nan)
+    for t in range(2 * pl, n):
+        ctr = t - pl
+        win_h = h[ctr - pl:t + 1]
+        win_l = l[ctr - pl:t + 1]
+        if h[ctr] == win_h.max():
+            piv_hi[t] = h[ctr]
+        if l[ctr] == win_l.min():
+            piv_lo[t] = l[ctr]
+
+    # ── Stateful bar loop ────────────────────────────────────
+    eff_q = cfg.quality_strength
+    act_sm = pas_sm = None
+    lower_band = upper_band = None
+    st_trend = 1
+    trend_start = 0
+    last_ph = last_pl = None
+
+    # learning state
+    sig_r_buf: List[float] = []
+    grid_cnt = [0] * 9
+    grid_ewm = [0.0] * 9
+    all_cum = all_peak = all_trough = 0.0
+    all_count = cur_ws = cur_ls = max_ws = max_ls = 0
+    since_calib = 0
+
+    # trade state
+    tr_dir = 0
+    tr_entry_bar = 0
+    tr_entry = tr_sl = tr_tp1 = tr_tp2 = tr_tp3 = None
+    tr_r1 = tr_r2 = tr_r3 = None
+    hit1 = hit2 = hit3 = False
+    tr_cell = -1
+    tr_side = ""
+
+    signals: List[Signal] = []
+    trades: List[ClosedTrade] = []
+    st_line = np.full(n, np.nan)
+    trend_arr = np.zeros(n, dtype=int)
+    clean_ticker = symbol.replace("/", "").replace(":USDT", "").replace(".P", "")
+
+    for t in range(n):
+        prev_trend = st_trend
+
+        # adaptive multipliers
+        legacy = (1.0 + cfg.adapt_strength * (0.5 - er[t])) if cfg.use_adaptive else 1.0
+        qdev = (1.0 - tqi[t]) ** cfg.quality_curve if cfg.use_tqi else 0.5
+        tqi_mult = 1.0 - eff_q + eff_q * (0.6 + 0.8 * qdev)
+        sym = base_mult * legacy * tqi_mult
+        act_raw = pas_raw = sym
+        if cfg.use_tqi and cfg.use_asym:
+            act_raw = sym * (1.0 - cfg.asym_strength * tqi[t] * 0.3)
+            pas_raw = sym * (1.0 + cfg.asym_strength * tqi[t] * 0.4)
+        if act_sm is None:
+            act_sm, pas_sm = act_raw, pas_raw
+        elif cfg.mult_smooth:
+            act_sm = act_sm * (1 - MULT_SMOOTH_ALPHA) + act_raw * MULT_SMOOTH_ALPHA
+            pas_sm = pas_sm * (1 - MULT_SMOOTH_ALPHA) + pas_raw * MULT_SMOOTH_ALPHA
+        else:
+            act_sm, pas_sm = act_raw, pas_raw
+
+        lower_mult = act_sm if prev_trend == 1 else pas_sm
+        upper_mult = pas_sm if prev_trend == 1 else act_sm
+        lb_raw = src[t] - lower_mult * atr_val[t]
+        ub_raw = src[t] + upper_mult * atr_val[t]
+
+        prev_lb, prev_ub = lower_band, upper_band
+        if prev_lb is None:
+            lower_band, upper_band = lb_raw, ub_raw
+        else:
+            lower_band = max(lb_raw, prev_lb) if c[t - 1] > prev_lb else lb_raw
+            upper_band = min(ub_raw, prev_ub) if c[t - 1] < prev_ub else ub_raw
+
+        price_flip_up = prev_trend == -1 and prev_ub is not None and c[t] > prev_ub
+        price_flip_dn = prev_trend == 1 and prev_lb is not None and c[t] < prev_lb
+
+        trend_age = t - trend_start
+        prev_tqi = tqi[t - 1] if t > 0 else 0.5
+        cf_base = (cfg.use_char_flip and cfg.use_tqi and prev_tqi > cfg.char_flip_high
+                   and tqi[t] < cfg.char_flip_low and trend_age >= cfg.char_flip_min_age)
+        cf_dn = cf_base and prev_trend == 1 and c[t] < src[t]
+        cf_up = cf_base and prev_trend == -1 and c[t] > src[t]
+
+        final_up = price_flip_up or cf_up
+        final_dn = price_flip_dn or cf_dn
+        if t == 0:
+            st_trend = 1
+        else:
+            st_trend = 1 if final_up else (-1 if final_dn else prev_trend)
+        if st_trend != prev_trend:
+            trend_start = t
+
+        st_line[t] = lower_band if st_trend == 1 else upper_band
+        trend_arr[t] = st_trend
+        flip_up = t > 0 and st_trend == 1 and prev_trend == -1
+        flip_dn = t > 0 and st_trend == -1 and prev_trend == 1
+
+        # dynamic TP
+        use_dyn = cfg.tp_mode == "Dynamic"
+        scale = (calc_dyn_tp_scale(tqi[t], vol_ratio[t], cfg.dyn_tqi_w, cfg.dyn_vol_w,
+                                   cfg.dyn_min_scale, cfg.dyn_max_scale) if use_dyn else 1.0)
+        if use_dyn:
+            f1 = cfg.dyn_floor_r1
+            f2 = cfg.dyn_floor_r1 * (fixed_tp2 / max(fixed_tp1, 0.01))
+            f3 = cfg.dyn_floor_r1 * (fixed_tp3 / max(fixed_tp1, 0.01))
+            e1 = clamp(fixed_tp1 * scale, f1, cfg.dyn_ceil_r3)
+            e2 = clamp(fixed_tp2 * scale, f2, cfg.dyn_ceil_r3)
+            e3 = clamp(fixed_tp3 * scale, f3, cfg.dyn_ceil_r3)
+        else:
+            e1, e2, e3 = fixed_tp1, fixed_tp2, fixed_tp3
+        live1, live2, live3 = sorted([e1, e2, e3])
+
+        # pivots
+        if not np.isnan(piv_hi[t]):
+            last_ph = piv_hi[t]
+        if not np.isnan(piv_lo[t]):
+            last_pl = piv_lo[t]
+
+        cur_cell = er_bin(er[t]) * 3 + vol_bin(vol_ratio[t])
+
+        # signals
+        warmed = t >= warmup
+        c_buy = flip_up and warmed
+        c_sell = flip_dn and warmed
+        buy_gated = c_buy and (not cfg.use_wt_filter or wt1a[t] > wt2a[t])
+        sell_gated = c_sell and (not cfg.use_wt_filter or wt1a[t] < wt2a[t])
+
+        if c_buy:
+            e = c[t]
+            base = last_pl if last_pl is not None else l[t]
+            sl = min(base - sl_mult * atr_val[t], e - sl_mult * atr_val[t])
+            risk = e - sl
+            tr_dir, tr_entry_bar, tr_entry, tr_sl = 1, t, e, sl
+            tr_tp1, tr_tp2, tr_tp3 = e + risk * live1, e + risk * live2, e + risk * live3
+            tr_r1, tr_r2, tr_r3 = live1, live2, live3
+            hit1 = hit2 = hit3 = False
+            tr_cell, tr_side = cur_cell, "LONG"
+
+        if c_sell:
+            e = c[t]
+            base = last_ph if last_ph is not None else h[t]
+            sl = max(base + sl_mult * atr_val[t], e + sl_mult * atr_val[t])
+            risk = sl - e
+            tr_dir, tr_entry_bar, tr_entry, tr_sl = -1, t, e, sl
+            tr_tp1, tr_tp2, tr_tp3 = e - risk * live1, e - risk * live2, e - risk * live3
+            tr_r1, tr_r2, tr_r3 = live1, live2, live3
+            hit1 = hit2 = hit3 = False
+            tr_cell, tr_side = cur_cell, "SHORT"
+
+        # hit detection + learning feedback
+        if tr_dir != 0 and tr_entry is not None and t > tr_entry_bar:
+            long = tr_dir == 1
+            r1_ok = h[t] >= tr_tp1 if long else l[t] <= tr_tp1
+            r2_ok = h[t] >= tr_tp2 if long else l[t] <= tr_tp2
+            r3_ok = h[t] >= tr_tp3 if long else l[t] <= tr_tp3
+            sl_hit = l[t] <= tr_sl if long else h[t] >= tr_sl
+            timeout = (t - tr_entry_bar) >= cfg.trade_max_age
+            hit1 = hit1 or r1_ok
+            hit2 = hit2 or r2_ok
+            hit3 = hit3 or r3_ok
+
+            if hit3 or sl_hit or timeout:
+                if hit3 or sl_hit:
+                    realized = calc_realized_r(sl_hit, hit1, hit2, hit3, tr_r1, tr_r2, tr_r3)
+                    reason = "TP3" if hit3 else "SL"
+                else:
+                    realized = calc_timeout_r(hit1, hit2, hit3, tr_r1, tr_r2, tr_r3)
+                    reason = "TIMEOUT"
+                realized = clamp(realized, -1.0, tr_r3)
+                trades.append(ClosedTrade(df.index[t], tr_side, realized, reason))
+
+                sig_r_buf.append(realized)
+                while len(sig_r_buf) > MAX_HISTORY_SIGS:
+                    sig_r_buf.pop(0)
+                all_count += 1
+                all_cum += realized
+                all_peak = max(all_peak, all_cum)
+                all_trough = min(all_trough, all_cum - all_peak)
+                if realized > 0:
+                    cur_ws += 1
+                    cur_ls = 0
+                    max_ws = max(max_ws, cur_ws)
+                else:
+                    cur_ls += 1
+                    cur_ws = 0
+                    max_ls = max(max_ls, cur_ls)
+
+                if 0 <= tr_cell < 9:
+                    grid_cnt[tr_cell] += 1
+                    cnt = grid_cnt[tr_cell]
+                    grid_ewm[tr_cell] = (realized if cnt == 1 else
+                                         grid_ewm[tr_cell] * (1 - EWMA_ALPHA) + realized * EWMA_ALPHA)
+                since_calib += 1
+
+                if (cfg.use_auto_calib and len(sig_r_buf) >= cfg.calib_window
+                        and since_calib >= cfg.calib_cooldown):
+                    post_avg = float(np.mean(sig_r_buf[-cfg.calib_window:]))
+                    if post_avg < cfg.calib_bad_r:
+                        drift = -cfg.calib_step_q if eff_q > cfg.quality_strength else cfg.calib_step_q
+                        eff_q = clamp(eff_q + drift, cfg.calib_min_q, cfg.calib_max_q)
+                        since_calib = 0
+                    elif post_avg > cfg.calib_good_r:
+                        since_calib = 0
+                tr_dir, tr_cell = 0, -1
+
+        if not cfg.use_auto_calib:
+            eff_q = cfg.quality_strength
+
+        # record signal + webhook payload
+        if c_buy or c_sell:
+            gated = buy_gated if c_buy else sell_gated
+            payload = None
+            if cfg.enable_alerts and gated and tr_entry is not None and tr_sl is not None:
+                risk_dist = abs(tr_entry - tr_sl)
+                qty = (cfg.equity * cfg.risk_pct / 100 / risk_dist) if risk_dist > 0 else None
+                ok = (risk_dist > 0 and (tr_sl < tr_entry if c_buy else tr_sl > tr_entry)
+                      and (not cfg.include_qty or qty is not None))
+                if ok:
+                    body = {
+                        "secret": cfg.secret, "exchange": cfg.exchange, "symbol": clean_ticker,
+                        "side": "LONG" if c_buy else "SHORT", "leverage": cfg.leverage,
+                        "entry": tr_entry, "sl": tr_sl, "tp1": tr_tp1, "tp2": tr_tp2,
+                    }
+                    if cfg.include_qty:
+                        body["qty"] = round(qty, 4)
+                    payload = json.dumps(body, separators=(",", ":"))
+            signals.append(Signal(df.index[t], "LONG" if c_buy else "SHORT",
+                                  tr_entry, tr_sl, tr_tp1, tr_tp2, tr_tp3,
+                                  tqi[t], er[t], rsi[t], wt1a[t], wt2a[t], payload is not None, payload))
+
+    # stats
+    last = sig_r_buf[-cfg.calib_window:]
+    win_rate = (sum(1 for r in last if r > 0) / len(last)) if last else 0.0
+    avg_r = float(np.mean(last)) if last else 0.0
+    run, min_run = 0.0, 0.0
+    for r in last:
+        run += r
+        min_run = min(min_run, run)
+
+    regime = "Trending" if er[-1] >= ER_HIGH else ("Mixed" if er[-1] >= ER_LOW else "Choppy")
+    stats = dict(
+        preset=P["name"], trend="Bullish" if st_trend == 1 else "Bearish",
+        tqi=round(float(tqi[-1]), 2), regime=regime,
+        wt1=round(float(wt1a[-1]), 2), wt2=round(float(wt2a[-1]), 2),
+        live_r=(round(live1, 1), round(live2, 1), round(live3, 1)),
+        closed_trades=all_count, win_rate=round(win_rate * 100, 1), avg_r=round(avg_r, 2),
+        window_dd=round(min_run, 2), all_time_dd=round(all_trough, 2),
+        cum_r=round(all_cum, 2), streak=f"W:{cur_ws}/{max_ws} L:{cur_ls}/{max_ls}",
+        regime_edge=(round(grid_ewm[er_bin(er[-1]) * 3 + vol_bin(vol_ratio[-1])], 2),
+                     grid_cnt[er_bin(er[-1]) * 3 + vol_bin(vol_ratio[-1])]),
+        effective_quality_strength=round(eff_q, 2),
+    )
+
+    df["st_line"] = st_line
+    df["st_trend"] = trend_arr
+    df["tqi"] = tqi
+    df["er"] = er
+    df["atr"] = atr_val
+    df["wt1"], df["wt2"], df["rsi"] = wt1a, wt2a, rsi
+
+    active = None
+    if tr_dir != 0:
+        active = dict(side=tr_side, entry=tr_entry, sl=tr_sl, tp1=tr_tp1, tp2=tr_tp2, tp3=tr_tp3,
+                      hit_tp1=hit1, hit_tp2=hit2, hit_tp3=hit3)
+    return Result(df, signals, trades, stats, active)
+
+
+# ── Data + CLI ───────────────────────────────────────────────
+def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    import ccxt
+    ex = ccxt.binanceusdm({"enableRateLimit": True})
+    rows = ex.fetch_ohlcv(symbol, timeframe, limit=min(limit, 1500))
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    df = df.set_index("ts")
+    return df.iloc[:-1]  # drop the still-forming candle
+
+
+def post_webhook(payload: str):
+    import requests
+    url = os.getenv("SATS_WEBHOOK_URL")
+    if not url:
+        print("SATS_WEBHOOK_URL not set; payload not sent:", payload)
+        return
+    r = requests.post(url, data=payload, headers={"Content-Type": "application/json"}, timeout=10)
+    print("webhook ->", r.status_code, r.text[:200])
+
+
+def print_dashboard(res: Result):
+    print("\n=== SATS Webhook dashboard ===")
+    for k, v in res.stats.items():
+        print(f"{k:>28}: {v}")
+    if res.active_trade:
+        print("active trade:", res.active_trade)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbol", default="BTC/USDT:USDT")
+    ap.add_argument("--timeframe", default="15m")
+    ap.add_argument("--limit", type=int, default=1500)
+    ap.add_argument("--csv", help="optional OHLCV csv (ts,open,high,low,close,volume) instead of ccxt")
+    ap.add_argument("--live", action="store_true", help="poll for new closed candles and POST webhooks")
+    ap.add_argument("--tp-mode", default="Fixed", choices=["Fixed", "Dynamic"])
+    ap.add_argument("--preset", default="Auto")
+    a = ap.parse_args()
+
+    cfg = Config(tp_mode=a.tp_mode, preset=a.preset)
+
+    def load():
+        if a.csv:
+            d = pd.read_csv(a.csv, parse_dates=["ts"], index_col="ts")
+            return d
+        return fetch_ohlcv(a.symbol, a.timeframe, a.limit)
+
+    if not a.live:
+        res = run_sats(load(), a.timeframe, a.symbol, cfg)
+        for s in res.signals[-10:]:
+            print(f"{s.time}  {s.side:5}  entry={s.entry:.4f} sl={s.sl:.4f} "
+                  f"tp1={s.tp1:.4f} tp2={s.tp2:.4f} tp3={s.tp3:.4f} "
+                  f"TQI={s.tqi:.2f} webhook={'yes' if s.webhook_sent else 'no (WT filter)'}")
+        print_dashboard(res)
+        return
+
+    last_sent = None
+    period = tf_minutes(a.timeframe) * 60
+    while True:
+        res = run_sats(load(), a.timeframe, a.symbol, cfg)
+        if res.signals:
+            s = res.signals[-1]
+            if s.time != last_sent and s.payload and s.time >= res.df.index[-1]:
+                post_webhook(s.payload)
+            last_sent = s.time
+        print_dashboard(res)
+        time.sleep(max(10, period - (time.time() % period) + 3))
+
+
+if __name__ == "__main__":
+    main()
