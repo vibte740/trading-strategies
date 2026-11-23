@@ -1,8 +1,8 @@
 //@version=6
 // ══════════════════════════════════════════════════════════
 // SATS Webhook - Self-Aware Trend System, Binance Futures payload
-// Alert JSON matches the "Long/Short Visual Drawer + Auto Webhook" format:
-// {secret, exchange, symbol, side, leverage, entry, sl, tp1, tp2, qty}
+// Alert JSON (compact, <300 chars, compatible with tv-webhook-receiver):
+// {secret, exchange, symbol, side, leverage, entry, sl, tp1, tp2[, qty]}
 // ══════════════════════════════════════════════════════════
 indicator(
      title            = "SATS Webhook (Binance Futures)",
@@ -27,14 +27,14 @@ GRP_WT     = "〰️ WaveTrend Filter"
 GRP_COLORS = "🎨 Colors"
 
 // ── Constants ─────────────────────────────────────────────
-WARMUP_FLOOR     = 50
-MAX_HISTORY_SIGS = 100
-HIT_COLOR_HEX    = #40E0D0
-ER_LOW_THRESH    = 0.25
-ER_HIGH_THRESH   = 0.50
-VOL_LOW_THRESH   = 0.7
-VOL_HIGH_THRESH  = 1.3
-EWMA_ALPHA       = 0.2
+WARMUP_FLOOR      = 50
+MAX_HISTORY_SIGS  = 100
+HIT_COLOR_HEX     = #40E0D0
+ER_LOW_THRESH     = 0.25
+ER_HIGH_THRESH    = 0.50
+VOL_LOW_THRESH    = 0.7
+VOL_HIGH_THRESH   = 1.3
+EWMA_ALPHA        = 0.2
 MULT_SMOOTH_ALPHA = 0.15
 
 // ══════════════════════════════════════════════════════════
@@ -71,14 +71,14 @@ volLenInput          = input.int(20, "Volume Z Window", minval = 5, maxval = 100
 pivotLenInput        = input.int(3, "Pivot Strength (SL anchor)", minval = 2, maxval = 10, group = GRP_TQI)
 rsiLenInput          = input.int(14, "RSI Length (Custom, display)", minval = 5, maxval = 50, group = GRP_TQI)
 
-showRiskInput  = input.bool(true, "Show TP/SL Levels", group = GRP_RISK)
-slAtrMultInput = input.float(1.5, "SL Buffer xATR (Custom)", minval = 0.3, maxval = 5.0, step = 0.1, group = GRP_RISK)
-tpModeInput    = input.string("Fixed", "TP Mode", options = ["Fixed", "Dynamic"], group = GRP_RISK)
-tp1RInput      = input.float(1.0, "TP1 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
-tp2RInput      = input.float(2.0, "TP2 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
-tp3RInput      = input.float(3.0, "TP3 (R-multiple, chart only)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+showRiskInput    = input.bool(true, "Show TP/SL Levels", group = GRP_RISK)
+slAtrMultInput   = input.float(1.5, "SL Buffer xATR (Custom)", minval = 0.3, maxval = 5.0, step = 0.1, group = GRP_RISK)
+tpModeInput      = input.string("Fixed", "TP Mode", options = ["Fixed", "Dynamic"], group = GRP_RISK)
+tp1RInput        = input.float(1.0, "TP1 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+tp2RInput        = input.float(2.0, "TP2 (R-multiple)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+tp3RInput        = input.float(3.0, "TP3 (R-multiple, chart only)", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
 labelOffsetInput = input.int(10, "Label Offset (bars)", minval = 10, maxval = 100, group = GRP_RISK)
-showHitsInput  = input.bool(true, "Mark TP Hits (visual)", group = GRP_RISK)
+showHitsInput    = input.bool(true, "Mark TP Hits (visual)", group = GRP_RISK)
 tradeMaxAgeInput = input.int(100, "Trade Timeout (bars)", minval = 10, maxval = 500, group = GRP_RISK)
 
 dynTpTqiWeightInput = input.float(0.6, "TQI Influence on TP", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_DYN_TP)
@@ -98,11 +98,11 @@ calibMinQInput     = input.float(0.1, "Quality Floor", minval = 0.0, maxval = 1.
 calibMaxQInput     = input.float(0.9, "Quality Ceiling", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_LEARN)
 resetLearningInput = input.bool(false, "Reset Learning Memory", group = GRP_LEARN)
 
-themeInput         = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = GRP_VISUAL)
-showBandsInput     = input.bool(true, "Show SuperTrend Bands", group = GRP_VISUAL)
-showTqiColorInput  = input.bool(true, "Color Line by TQI", group = GRP_VISUAL)
-showSignalsInput   = input.bool(true, "Show Signal Labels", group = GRP_VISUAL)
-showBgInput        = input.bool(false, "Show Trend Background", group = GRP_VISUAL)
+themeInput        = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = GRP_VISUAL)
+showBandsInput    = input.bool(true, "Show SuperTrend Bands", group = GRP_VISUAL)
+showTqiColorInput = input.bool(true, "Color Line by TQI", group = GRP_VISUAL)
+showSignalsInput  = input.bool(true, "Show Signal Labels", group = GRP_VISUAL)
+showBgInput       = input.bool(false, "Show Trend Background", group = GRP_VISUAL)
 
 showDashInput = input.bool(true, "Show Dashboard", group = GRP_DASH)
 showPerfInput = input.bool(true, "Show Performance Stats", group = GRP_DASH)
@@ -113,13 +113,14 @@ bearColorInput = input.color(#FF5252, "Bear", inline = "c1", group = GRP_COLORS)
 slColorInput   = input.color(#FF1744, "SL",   inline = "c2", group = GRP_COLORS)
 tpColorInput   = input.color(#00E676, "TP",   inline = "c2", group = GRP_COLORS)
 
-// Webhook (same fields as the Long/Short Visual Drawer script)
+// Webhook (compatible with tv-webhook-receiver dynamic balance sizing)
 enableAlertsInput = input.bool(true, "Enable Webhook Alerts", group = GRP_WEB)
 secretKey         = input.string("PASTE_YOUR_WEBHOOK_SECRET", "Webhook Secret", group = GRP_WEB)
 exchangeInput     = input.string("binance_futures", "Exchange", group = GRP_WEB)
 leverage          = input.int(10, "Leverage", minval = 1, maxval = 125, group = GRP_WEB)
-equity            = input.float(10000, "Account equity", minval = 1, group = GRP_WEB)
-riskPct           = input.float(1.0, "Risk per trade (%)", minval = 0.1, step = 0.1, group = GRP_WEB)
+includeQtyInput   = input.bool(false, "Include Qty in Payload (off = server 20% sizing)", group = GRP_WEB)
+equity            = input.float(10000, "Account Equity (if Qty enabled)", minval = 1, group = GRP_WEB)
+riskPct           = input.float(1.0, "Risk per Trade % (if Qty enabled)", minval = 0.1, step = 0.1, group = GRP_WEB)
 
 useWtFilterInput  = input.bool(true, "Enable WaveTrend Confirmation", group = GRP_WT, tooltip = "LONG alerts only fire when wt1 > wt2, SHORT only when wt1 < wt2.")
 wtN1Input         = input.int(10, "Channel Length", minval = 1, maxval = 50, group = GRP_WT)
@@ -181,18 +182,18 @@ bool isDark = switch themeInput
     "Light" => false
     => color.r(chart.bg_color) < 128
 
-color TEXT_COLOR    = isDark ? #E0E0E0 : #1A1A1A
-color TEXT_MUTED    = isDark ? #9E9E9E : #757575
-color TEXT_BRIGHT   = isDark ? #FFFFFF : #000000
-color TABLE_BG      = isDark ? color.new(#131722, 5) : color.new(#FFFFFF, 5)
-color TABLE_BORDER  = isDark ? #2A2E39 : #D0D0D0
-color TABLE_ROW_ALT = isDark ? #1C2030 : #F0F4F8
-color HEADER_BG     = #2962FF
-color HEADER_TEXT   = #FFFFFF
-color BULL_BG       = color.new(bullColorInput, 92)
-color BEAR_BG       = color.new(bearColorInput, 92)
+color TEXT_COLOR     = isDark ? #E0E0E0 : #1A1A1A
+color TEXT_MUTED     = isDark ? #9E9E9E : #757575
+color TEXT_BRIGHT    = isDark ? #FFFFFF : #000000
+color TABLE_BG       = isDark ? color.new(#131722, 5) : color.new(#FFFFFF, 5)
+color TABLE_BORDER   = isDark ? #2A2E39 : #D0D0D0
+color TABLE_ROW_ALT  = isDark ? #1C2030 : #F0F4F8
+color HEADER_BG      = #2962FF
+color HEADER_TEXT    = #FFFFFF
+color BULL_BG        = color.new(bullColorInput, 92)
+color BEAR_BG        = color.new(bearColorInput, 92)
 color NEUTRAL_YELLOW = #FFEB3B
-color HIT_COLOR     = HIT_COLOR_HEX
+color HIT_COLOR      = HIT_COLOR_HEX
 
 // ══════════════════════════════════════════════════════════
 // HELPERS
@@ -288,13 +289,13 @@ updateGridCell(int idx, float r) =>
 
 calcRollingStats(int window) =>
     int n = array.size(signalRBuffer)
-    float winRt = 0.0
-    float avgR  = 0.0
+    float winRt  = 0.0
+    float avgR   = 0.0
     float minRun = 0.0
     if n > 0
         int startIdx = math.max(0, n - window)
-        float sumR = 0.0
-        int wins = 0
+        float sumR     = 0.0
+        int   wins     = 0
         float runningR = 0.0
         for i = startIdx to n - 1
             float r = array.get(signalRBuffer, i)
@@ -323,14 +324,14 @@ float atrValue    = useEffAtrInput ? rawAtr * (0.5 + 0.5 * erValue) : rawAtr
 float rsiVal      = nz(ta.rsi(close, effectiveRsiLen), 50.0)
 
 // ── WaveTrend ─────────────────────────────────────────────
-float wtAp  = hlc3
-float wtEsa = ta.ema(wtAp, wtN1Input)
-float wtD   = ta.ema(math.abs(wtAp - wtEsa), wtN1Input)
-float wtCi  = safeDiv(wtAp - wtEsa, 0.015 * wtD, 0.0)
-float wt1   = ta.ema(wtCi, wtN2Input)
-float wt2   = ta.sma(wt1, 4)
-bool wtBullish = wt1 > wt2
-bool wtBearish = wt1 < wt2
+float wtAp      = hlc3
+float wtEsa     = ta.ema(wtAp, wtN1Input)
+float wtD       = ta.ema(math.abs(wtAp - wtEsa), wtN1Input)
+float wtCi      = safeDiv(wtAp - wtEsa, 0.015 * wtD, 0.0)
+float wt1       = ta.ema(wtCi, wtN2Input)
+float wt2       = ta.sma(wt1, 4)
+bool  wtBullish = wt1 > wt2
+bool  wtBearish = wt1 < wt2
 
 // ── Trend Quality Index ───────────────────────────────────
 float tqiEr = clamp(erValue, 0.0, 1.0)
@@ -352,18 +353,18 @@ for i = 0 to tqiMomLenInput - 1
         alignedBars += 1
 float tqiMom = float(alignedBars) / float(tqiMomLenInput)
 
-float tqiWSum = tqiWeightErInput + tqiWeightVolInput + tqiWeightStructInput + tqiWeightMomInput
+float tqiWSum        = tqiWeightErInput + tqiWeightVolInput + tqiWeightStructInput + tqiWeightMomInput
 float tqiWeightDenom = tqiWSum > 0 ? tqiWSum : 1.0
-float tqiRaw = useTqiInput ? (tqiEr * tqiWeightErInput + tqiVol * tqiWeightVolInput + tqiStruct * tqiWeightStructInput + tqiMom * tqiWeightMomInput) / tqiWeightDenom : 0.5
-float tqi    = clamp(tqiRaw, 0.0, 1.0)
+float tqiRaw         = useTqiInput ? (tqiEr * tqiWeightErInput + tqiVol * tqiWeightVolInput + tqiStruct * tqiWeightStructInput + tqiMom * tqiWeightMomInput) / tqiWeightDenom : 0.5
+float tqi            = clamp(tqiRaw, 0.0, 1.0)
 
 // ── Adaptive multipliers ──────────────────────────────────
 float legacyAdaptFactor = useAdaptiveInput ? (1.0 + adaptStrengthInput * (0.5 - erValue)) : 1.0
 var float effectiveQualityStrength = qualityStrengthInput
 
 float qualityDeviation = useTqiInput ? math.pow(1.0 - tqi, qualityCurveInput) : 0.5
-float tqiMult = 1.0 - effectiveQualityStrength + effectiveQualityStrength * (0.6 + 0.8 * qualityDeviation)
-float symMult = effectiveBaseMult * legacyAdaptFactor * tqiMult
+float tqiMult          = 1.0 - effectiveQualityStrength + effectiveQualityStrength * (0.6 + 0.8 * qualityDeviation)
+float symMult          = effectiveBaseMult * legacyAdaptFactor * tqiMult
 
 float activeMultRaw  = symMult
 float passiveMultRaw = symMult
@@ -397,10 +398,10 @@ bool priceFlipDown = prevTrend == 1 and close < lowerBand[1]
 var int trendStartBar = 0
 int trendAge = bar_index - trendStartBar
 
-float prevTqi = nz(tqi[1], 0.5)
-bool charFlipCondBase = useCharFlipInput and useTqiInput and prevTqi > charFlipHighInput and tqi < charFlipLowInput and trendAge >= charFlipMinAgeInput
-bool charFlipDown = charFlipCondBase and prevTrend == 1 and close < sourceInput
-bool charFlipUp   = charFlipCondBase and prevTrend == -1 and close > sourceInput
+float prevTqi          = nz(tqi[1], 0.5)
+bool  charFlipCondBase = useCharFlipInput and useTqiInput and prevTqi > charFlipHighInput and tqi < charFlipLowInput and trendAge >= charFlipMinAgeInput
+bool  charFlipDown     = charFlipCondBase and prevTrend == 1 and close < sourceInput
+bool  charFlipUp       = charFlipCondBase and prevTrend == -1 and close > sourceInput
 
 bool finalFlipUp   = priceFlipUp or charFlipUp
 bool finalFlipDown = priceFlipDown or charFlipDown
@@ -410,9 +411,9 @@ stTrend := na(stTrend[1]) ? 1 : (finalFlipUp ? 1 : (finalFlipDown ? -1 : prevTre
 if stTrend != prevTrend
     trendStartBar := bar_index
 
-float stLine = stTrend == 1 ? lowerBand : upperBand
-bool flipUp   = stTrend == 1 and stTrend[1] == -1
-bool flipDown = stTrend == -1 and stTrend[1] == 1
+float stLine   = stTrend == 1 ? lowerBand : upperBand
+bool  flipUp   = stTrend == 1 and stTrend[1] == -1
+bool  flipDown = stTrend == -1 and stTrend[1] == 1
 
 // ── Dynamic TP R-multiples ────────────────────────────────
 bool  useDynTp = tpModeInput == "Dynamic"
@@ -440,14 +441,14 @@ if not na(pivotLow)
     lastPivotLow := pivotLow
 
 // ── Learning state ────────────────────────────────────────
-var float allTimeCumR   = 0.0
-var float allTimePeak   = 0.0
-var float allTimeTrough = 0.0
-var int   allTimeCount  = 0
-var int   curWinStreak  = 0
-var int   curLossStreak = 0
-var int   maxWinStreak  = 0
-var int   maxLossStreak = 0
+var float allTimeCumR       = 0.0
+var float allTimePeak       = 0.0
+var float allTimeTrough     = 0.0
+var int   allTimeCount      = 0
+var int   curWinStreak      = 0
+var int   curLossStreak     = 0
+var int   maxWinStreak      = 0
+var int   maxLossStreak     = 0
 var int   signalsSinceCalib = 0
 
 if resetLearningInput and not resetLearningInput[1]
@@ -456,20 +457,20 @@ if resetLearningInput and not resetLearningInput[1]
         array.set(gridCount, i, 0)
         array.set(gridEwmR, i, 0.0)
     effectiveQualityStrength := qualityStrengthInput
-    allTimeCumR   := 0.0
-    allTimePeak   := 0.0
-    allTimeTrough := 0.0
-    allTimeCount  := 0
-    curWinStreak  := 0
-    curLossStreak := 0
-    maxWinStreak  := 0
-    maxLossStreak := 0
+    allTimeCumR       := 0.0
+    allTimePeak       := 0.0
+    allTimeTrough     := 0.0
+    allTimeCount      := 0
+    curWinStreak      := 0
+    curLossStreak     := 0
+    maxWinStreak      := 0
+    maxLossStreak     := 0
     signalsSinceCalib := 0
 
 if not useAutoCalibInput
     effectiveQualityStrength := qualityStrengthInput
 
-int curCellIdx = cellIdx(erBin(erValue), volBin(volRatio))
+int   curCellIdx     = cellIdx(erBin(erValue), volBin(volRatio))
 int   curRegimeCount = array.get(gridCount, curCellIdx)
 float curRegimeEdge  = array.get(gridEwmR, curCellIdx)
 
@@ -485,20 +486,20 @@ bool satsSellGated = confirmedSell and (not useWtFilterInput or wtBearish)
 // ══════════════════════════════════════════════════════════
 // ACTIVE TRADE STATE
 // ══════════════════════════════════════════════════════════
-var int   tradeDir      = 0
-var int   tradeEntryBar = 0
-var float tradeEntry    = na
-var float tradeSl       = na
-var float tradeTp1      = na
-var float tradeTp2      = na
-var float tradeTp3      = na
-var float tradeTp1R     = na
-var float tradeTp2R     = na
-var float tradeTp3R     = na
-var bool  hitTp1        = false
-var bool  hitTp2        = false
-var bool  hitTp3        = false
-var int   tradeCellIdx  = -1
+var int   tradeDir        = 0
+var int   tradeEntryBar   = 0
+var float tradeEntry      = na
+var float tradeSl         = na
+var float tradeTp1        = na
+var float tradeTp2        = na
+var float tradeTp3        = na
+var float tradeTp1R       = na
+var float tradeTp2R       = na
+var float tradeTp3R       = na
+var bool  hitTp1          = false
+var bool  hitTp2          = false
+var bool  hitTp3          = false
+var int   tradeCellIdx    = -1
 var int   lastDisplaySide = 0
 var int   lastSignalBar   = 0
 
@@ -507,20 +508,20 @@ if confirmedBuy
     float slBase = not na(lastPivotLow) ? lastPivotLow : low
     float tSl    = math.min(slBase - effectiveSlMult * atrValue, tEntry - effectiveSlMult * atrValue)
     float riskD  = tEntry - tSl
-    tradeDir      := 1
-    tradeEntryBar := bar_index
-    tradeEntry    := tEntry
-    tradeSl       := tSl
-    tradeTp1      := tEntry + riskD * liveTp1R
-    tradeTp2      := tEntry + riskD * liveTp2R
-    tradeTp3      := tEntry + riskD * liveTp3R
-    tradeTp1R     := liveTp1R
-    tradeTp2R     := liveTp2R
-    tradeTp3R     := liveTp3R
-    hitTp1 := false
-    hitTp2 := false
-    hitTp3 := false
-    tradeCellIdx := curCellIdx
+    tradeDir        := 1
+    tradeEntryBar   := bar_index
+    tradeEntry      := tEntry
+    tradeSl         := tSl
+    tradeTp1        := tEntry + riskD * liveTp1R
+    tradeTp2        := tEntry + riskD * liveTp2R
+    tradeTp3        := tEntry + riskD * liveTp3R
+    tradeTp1R       := liveTp1R
+    tradeTp2R       := liveTp2R
+    tradeTp3R       := liveTp3R
+    hitTp1          := false
+    hitTp2          := false
+    hitTp3          := false
+    tradeCellIdx    := curCellIdx
     lastDisplaySide := 1
     lastSignalBar   := bar_index
 
@@ -529,27 +530,27 @@ if confirmedSell
     float slBase = not na(lastPivotHigh) ? lastPivotHigh : high
     float tSl    = math.max(slBase + effectiveSlMult * atrValue, tEntry + effectiveSlMult * atrValue)
     float riskD  = tSl - tEntry
-    tradeDir      := -1
-    tradeEntryBar := bar_index
-    tradeEntry    := tEntry
-    tradeSl       := tSl
-    tradeTp1      := tEntry - riskD * liveTp1R
-    tradeTp2      := tEntry - riskD * liveTp2R
-    tradeTp3      := tEntry - riskD * liveTp3R
-    tradeTp1R     := liveTp1R
-    tradeTp2R     := liveTp2R
-    tradeTp3R     := liveTp3R
-    hitTp1 := false
-    hitTp2 := false
-    hitTp3 := false
-    tradeCellIdx := curCellIdx
+    tradeDir        := -1
+    tradeEntryBar   := bar_index
+    tradeEntry      := tEntry
+    tradeSl         := tSl
+    tradeTp1        := tEntry - riskD * liveTp1R
+    tradeTp2        := tEntry - riskD * liveTp2R
+    tradeTp3        := tEntry - riskD * liveTp3R
+    tradeTp1R       := liveTp1R
+    tradeTp2R       := liveTp2R
+    tradeTp3R       := liveTp3R
+    hitTp1          := false
+    hitTp2          := false
+    hitTp3          := false
+    tradeCellIdx    := curCellIdx
     lastDisplaySide := -1
     lastSignalBar   := bar_index
 
 // ══════════════════════════════════════════════════════════
 // PLOTS & LABELS
 // ══════════════════════════════════════════════════════════
-int lineTransp = showTqiColorInput and useTqiInput ? int(clamp(math.round(mapClampInv(tqi, 0.1, 0.9, 70.0, 0.0)), 0, 100)) : 0
+int   lineTransp  = showTqiColorInput and useTqiInput ? int(clamp(math.round(mapClampInv(tqi, 0.1, 0.9, 70.0, 0.0)), 0, 100)) : 0
 color stLineColor = stTrend == 1 ? color.new(bullColorInput, lineTransp) : color.new(bearColorInput, lineTransp)
 
 plot(showBandsInput and isWarmedUp ? stLine : na, "SuperTrend", color = stLineColor, linewidth = 2)
@@ -654,9 +655,9 @@ if tradeDir != 0 and barstate.isconfirmed and not na(tradeEntry) and not na(trad
             label.set_color(lbTp3, color.new(HIT_COLOR, 40))
 
     if hitTp3 or slHit or timeoutHit
-        float useTp1R = nz(tradeTp1R, fixedTp1R)
-        float useTp2R = nz(tradeTp2R, fixedTp2R)
-        float useTp3R = nz(tradeTp3R, fixedTp3R)
+        float useTp1R   = nz(tradeTp1R, fixedTp1R)
+        float useTp2R   = nz(tradeTp2R, fixedTp2R)
+        float useTp3R   = nz(tradeTp3R, fixedTp3R)
         float realizedR = 0.0
         if hitTp3 or slHit
             realizedR := calcRealizedR(slHit, hitTp1, hitTp2, hitTp3, useTp1R, useTp2R, useTp3R)
@@ -689,9 +690,9 @@ if tradeDir != 0 and barstate.isconfirmed and not na(tradeEntry) and not na(trad
         signalsSinceCalib += 1
 
         if useAutoCalibInput and array.size(signalRBuffer) >= calibWindowInput and signalsSinceCalib >= calibCooldownInput
-            int n = array.size(signalRBuffer)
-            int startIdx = math.max(0, n - calibWindowInput)
-            float sumR = 0.0
+            int   n        = array.size(signalRBuffer)
+            int   startIdx = math.max(0, n - calibWindowInput)
+            float sumR     = 0.0
             for i = startIdx to n - 1
                 sumR += array.get(signalRBuffer, i)
             float postAvgR = sumR / float(n - startIdx)
@@ -702,19 +703,20 @@ if tradeDir != 0 and barstate.isconfirmed and not na(tradeEntry) and not na(trad
             else if postAvgR > calibGoodRInput
                 signalsSinceCalib := 0
 
-        tradeDir := 0
+        tradeDir     := 0
         tradeCellIdx := -1
 
 // ══════════════════════════════════════════════════════════
-// WEBHOOK ALERT  (same JSON schema as the Long/Short Drawer)
+// WEBHOOK ALERT (Dynamic JSON for tv-webhook-receiver)
 // ══════════════════════════════════════════════════════════
 if enableAlertsInput and (satsBuyGated or satsSellGated) and not na(tradeEntry) and not na(tradeSl)
     float riskDist = math.abs(tradeEntry - tradeSl)
     float qty      = riskDist > 0 ? equity * riskPct / 100 / riskDist : na
-    bool  okLevels = riskDist > 0 and not na(qty) and (satsBuyGated ? tradeSl < tradeEntry : tradeSl > tradeEntry)
+    bool  okLevels = riskDist > 0 and (satsBuyGated ? tradeSl < tradeEntry : tradeSl > tradeEntry) and (not includeQtyInput or not na(qty))
     if okLevels
         string sideStr     = satsBuyGated ? "LONG" : "SHORT"
         string cleanTicker = str.replace_all(syminfo.ticker, ".P", "")
+        string qtyPart     = includeQtyInput ? ',"qty":' + str.tostring(qty, "#.####") : ""
         string payload = '{' +
              '"secret":"' + secretKey + '",' +
              '"exchange":"' + exchangeInput + '",' +
@@ -724,10 +726,16 @@ if enableAlertsInput and (satsBuyGated or satsSellGated) and not na(tradeEntry) 
              '"entry":' + str.tostring(tradeEntry, format.mintick) + ',' +
              '"sl":' + str.tostring(tradeSl, format.mintick) + ',' +
              '"tp1":' + str.tostring(tradeTp1, format.mintick) + ',' +
-             '"tp2":' + str.tostring(tradeTp2, format.mintick) + ',' +
-             '"qty":' + str.tostring(qty, "#.####") +
+             '"tp2":' + str.tostring(tradeTp2, format.mintick) +
+             qtyPart +
              '}'
         alert(payload, alert.freq_once_per_bar_close)
+
+// Hidden plots for optional {{plot("...")}} alert box usage
+plot(tradeEntry, "entry", display = display.none)
+plot(tradeSl,    "sl",    display = display.none)
+plot(tradeTp1,   "tp1",   display = display.none)
+plot(tradeTp2,   "tp2",   display = display.none)
 
 alertcondition(satsBuyGated,  title = "SATS LONG",  message = "SATS LONG confirmed - {{ticker}} {{interval}}")
 alertcondition(satsSellGated, title = "SATS SHORT", message = "SATS SHORT confirmed - {{ticker}} {{interval}}")
