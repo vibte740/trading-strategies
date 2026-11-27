@@ -1,0 +1,341 @@
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════
+//  SCALP-1M-PRO · COMBINED LONG & SHORT · Dedicated 1-Minute Webhook Scalper
+//  Single unified alert-only indicator() — zero strategy orders;
+//  tv-webhook-receiver executes the position, full-size MARK_PRICE SL,
+//  and 50/50 split TP1/TP2 brackets for both LONG and SHORT from ONE alert.
+//
+//  Core 1m Logic (v1.1, Non-Repainting):
+//   1. 15m HTF Trend (lookahead_off):
+//      - LONG : closed-bar close > EMA21 > EMA50
+//      - SHORT: closed-bar close < EMA50 and EMA21 < EMA50
+//   2. 1m Volatility & Volume: ATR% in [0.06%, 1.50%], RVOL >= 1.30
+//   3. 1m Mean-Reversion Reclaim + Candle Body >= 0.35 + RSI Turn:
+//      - LONG : low[1] <= BB_lower(20, 2.2), bullish reclaim close > BB_lower,
+//               RSI(14) <= 38 and RSI rising
+//      - SHORT: high[1] >= BB_upper(20, 2.2), bearish reclaim close < BB_upper,
+//               RSI(14) >= 58 and RSI falling
+//   4. Fee-Safe Risk: SL 1.00% (or 2.5x ATR), TP1 1.00% (1.0R), TP2 2.00% (2.0R)
+//      with virtual breakeven-after-TP1 tracking & cooldown/loss-streak guards.
+//
+//  ALERT SETUP (ONE alert handles BOTH LONG & SHORT):
+//   Condition → "SCALP 1M PRO · LONG & SHORT · Webhook" → "Any alert() function call"
+//   Message   → EMPTY · Set "secret" in Settings → Inputs → ④ Webhook.
+// ════════════════════════════════════════════════════════════════════════════
+indicator(
+     title            = "SCALP 1M PRO · LONG & SHORT · Webhook",
+     shorttitle       = "SCALP-1M-PRO",
+     overlay          = true,
+     max_labels_count = 500,
+     max_lines_count  = 500,
+     max_bars_back    = 2000)
+
+// ═══════════════════════════════ INPUTS ═════════════════════════════════════
+const string G_DIR = "① Direction & risk guards"
+enableLong         = input.bool(true,  "Enable LONG",                         group = G_DIR)
+enableShort        = input.bool(true,  "Enable SHORT",                        group = G_DIR)
+cooldownBars       = input.int(10,     "Cooldown bars between alerts",        minval = 0, maxval = 200, group = G_DIR)
+lockWhileActive    = input.bool(true,  "Virtual trade lock (no duplicates)",  group = G_DIR)
+virtualTimeoutBars = input.int(240,    "Virtual trade timeout (bars, 240=4h)", minval = 10, maxval = 500, group = G_DIR)
+useLossPause       = input.bool(true,  "Pause after consecutive SL losses",   group = G_DIR)
+maxConsecLosses    = input.int(3,      "Max consecutive SL losses",           minval = 1, maxval = 10, group = G_DIR)
+lossPauseBars      = input.int(30,     "Loss-streak pause (bars, 30=30m)",    minval = 5, maxval = 240, group = G_DIR)
+maxAlertsPerDay    = input.int(12,     "Max alerts per UTC day (0 = off)",    minval = 0, maxval = 100, group = G_DIR)
+
+const string G_SIG = "② 1m Signal & HTF Trend"
+htfTimeframe  = input.timeframe("15", "HTF timeframe",                      group = G_SIG)
+htfFastLen    = input.int(21,         "HTF Fast EMA",                       minval = 5, group = G_SIG)
+htfSlowLen    = input.int(50,         "HTF Slow EMA",                       minval = 10, group = G_SIG)
+bbLength      = input.int(20,         "BB Length",                          minval = 5, group = G_SIG)
+bbMult        = input.float(2.2,      "BB StdDev Mult",                     minval = 1.0, step = 0.1, group = G_SIG)
+rsiLength     = input.int(14,         "RSI Length",                         minval = 2, group = G_SIG)
+rsiLongMax    = input.float(38.0,     "LONG: RSI must be ≤",                minval = 10.0, maxval = 60.0, step = 1.0, group = G_SIG)
+rsiShortMin   = input.float(58.0,     "SHORT: RSI must be ≥",               minval = 40.0, maxval = 90.0, step = 1.0, group = G_SIG)
+minBodyRatio  = input.float(0.35,     "Min candle body ratio",              minval = 0.0, maxval = 0.9, step = 0.05, group = G_SIG)
+rvolLen       = input.int(20,         "RVOL Lookback",                      minval = 5, group = G_SIG)
+rvolMin       = input.float(1.30,     "Min RVOL",                           minval = 0.5, maxval = 5.0, step = 0.05, group = G_SIG)
+minAtrPct     = input.float(0.06,     "Min 1m ATR% (dead-market floor)",    minval = 0.0, maxval = 2.0, step = 0.01, group = G_SIG)
+maxAtrPct     = input.float(1.50,     "Max 1m ATR% (spike cap)",            minval = 0.2, maxval = 10.0, step = 0.1, group = G_SIG)
+
+const string G_RISK = "③ Fee-Safe Risk & Targets"
+atrLength       = input.int(14,     "ATR Length",                        minval = 2, group = G_RISK)
+slAtrMult       = input.float(2.50, "SL = ATR ×",                        minval = 0.5, step = 0.1, group = G_RISK)
+minSlPct        = input.float(1.00, "SL Min Floor (% of price)",         minval = 0.30, maxval = 3.0, step = 0.05, group = G_RISK)
+maxSlPct        = input.float(2.00, "SL Hard Cap (% of price)",          minval = 0.50, maxval = 5.0, step = 0.10, group = G_RISK)
+tp1RMult        = input.float(1.00, "TP1 = R ×",                         minval = 0.5, step = 0.05, group = G_RISK)
+tp2RMult        = input.float(2.00, "TP2 = R ×",                         minval = 1.0, step = 0.10, group = G_RISK)
+minTp1Pct       = input.float(1.00, "TP1 Min Floor (% of price)",        minval = 0.40, maxval = 5.0, step = 0.05, group = G_RISK)
+minTp2Pct       = input.float(2.00, "TP2 Min Floor (% of price)",        minval = 0.80, maxval = 10.0, step = 0.05, group = G_RISK)
+singleTpMode    = input.bool(false, "Single-TP Mode (small accounts)",   group = G_RISK)
+tp1SingleR      = input.float(1.50, "Single-TP Mode: TP1 = R ×",         minval = 0.8, maxval = 5.0, step = 0.1, group = G_RISK)
+minTp1SinglePct = input.float(1.20, "Single-TP Mode: TP1 Min Floor (%)", minval = 0.4, maxval = 5.0, step = 0.05, group = G_RISK)
+minRrTp1        = input.float(1.00, "Min TP1 R:R Gate",                  minval = 0.5, maxval = 3.0, step = 0.05, group = G_RISK)
+minBlendedRr    = input.float(1.30, "Min Blended R:R Gate (50/50)",      minval = 0.8, maxval = 4.0, step = 0.05, group = G_RISK)
+
+const string G_HOOK = "④ Webhook"
+sendAlerts       = input.bool(true,   "Send alert() JSON",               group = G_HOOK)
+secretKey        = input.string("PASTE_YOUR_WEBHOOK_SECRET", "secret",   group = G_HOOK)
+symbolFormat     = input.string("clean", "symbol format", options = ["clean", "ticker", "tickerid"], group = G_HOOK)
+marketType       = input.string("futures", "market_type", options = ["futures", "spot"], group = G_HOOK)
+leverageInput    = input.int(5,       "leverage (server caps at 5x)",    minval = 1, maxval = 20, group = G_HOOK)
+perpOnly         = input.bool(true,   "Only alert on perpetual charts",  group = G_HOOK)
+enforceTimeframe = input.bool(true,   "Enforce 1m timeframe guard",      group = G_HOOK)
+includeMeta      = input.bool(true,   "Include audit metadata",          group = G_HOOK)
+
+const string G_VIS = "⑤ Visuals"
+showLevels    = input.bool(true, "Show per-entry Entry / SL / TP1 / TP2 lines", group = G_VIS)
+levelLineBars = input.int(20,    "Entry level line span (bars)", minval = 2, maxval = 150, group = G_VIS)
+showLabels    = input.bool(true, "Show entry price / SL / TP1 / TP2 labels", group = G_VIS)
+showTable     = input.bool(true, "Show status table", group = G_VIS)
+
+// ══════════════════════════════ HELPERS ═════════════════════════════════════
+string rawTick  = str.upper(syminfo.ticker)
+bool   isPerp   = str.endswith(rawTick, ".P") or str.endswith(rawTick, ".PERP") or str.endswith(rawTick, "SWAP")
+string cleanSym = str.replace_all(str.replace_all(str.replace_all(str.replace_all(str.replace_all(rawTick, ".PERP", ""), ".P", ""), "-SWAP", ""), "SWAP", ""), "-", "")
+cleanSym       := str.replace_all(cleanSym, "/", "")
+string cleanSec = str.trim(secretKey)
+bool   secretOk = str.length(cleanSec) > 0 and cleanSec != "PASTE_YOUR_WEBHOOK_SECRET"
+bool   routeOk  = marketType == "spot" or not perpOnly or isPerp
+bool   tfOk     = not enforceTimeframe or (timeframe.isminutes and timeframe.multiplier == 1)
+bool   hookOk   = sendAlerts and secretOk and routeOk and tfOk
+
+f_symbol() =>
+    symbolFormat == "tickerid" ? syminfo.tickerid : symbolFormat == "ticker" ? syminfo.ticker : cleanSym
+
+f_num(float v) =>
+    na(v) ? "null" : str.tostring(math.round_to_mintick(v), format.mintick)
+
+f_pct(float delta, float base) =>
+    base > 0 ? str.tostring(math.abs(delta) / base * 100.0, "#.2") + "%" : "0.00%"
+
+f_htfValues() =>
+    float eFast = ta.ema(close, htfFastLen)
+    float eSlow = ta.ema(close, htfSlowLen)
+    [eFast[1], eSlow[1], close[1]]
+
+f_levels(bool isLong, float entryRaw, float atrVal) =>
+    float entry   = math.round_to_mintick(entryRaw)
+    float rawRisk = slAtrMult * atrVal
+    float minRisk = entry * minSlPct / 100.0
+    float maxRisk = entry * maxSlPct / 100.0
+    float risk    = math.min(maxRisk, math.max(rawRisk, minRisk))
+    float sl      = isLong ? math.round_to_mintick(math.max(syminfo.mintick, entry - risk)) : math.round_to_mintick(entry + risk)
+    float effRisk = isLong ? (entry - sl) : (sl - entry)
+    float t1Mult  = singleTpMode ? tp1SingleR : tp1RMult
+    float t1Floor = singleTpMode ? minTp1SinglePct : minTp1Pct
+    float t1      = isLong ? math.round_to_mintick(math.max(entry + effRisk * t1Mult, entry * (1.0 + t1Floor / 100.0))) : math.round_to_mintick(math.max(syminfo.mintick * 2, math.min(entry - effRisk * t1Mult, entry * (1.0 - t1Floor / 100.0))))
+    float t2      = isLong ? math.round_to_mintick(math.max(entry + effRisk * tp2RMult, math.max(entry * (1.0 + minTp2Pct / 100.0), t1 + syminfo.mintick * 2))) : math.round_to_mintick(math.max(syminfo.mintick, math.min(entry - effRisk * tp2RMult, math.min(entry * (1.0 - minTp2Pct / 100.0), t1 - syminfo.mintick * 2))))
+    [entry, sl, t1, t2]
+
+f_levelsValid(bool isLong, float e, float sl, float t1, float t2) =>
+    bool notNa    = not na(e) and not na(sl) and not na(t1) and (singleTpMode or not na(t2))
+    bool pos      = e > 0 and sl > 0 and t1 > 0 and (singleTpMode or t2 > 0)
+    bool ord      = isLong ? (singleTpMode ? (sl < e and t1 > e) : (sl < e and t1 > e and t2 > t1)) : (singleTpMode ? (sl > e and t1 < e) : (sl > e and t1 < e and t2 < t1))
+    float riskD   = isLong ? (e - sl) : (sl - e)
+    float t1Dist  = isLong ? (t1 - e) : (e - t1)
+    float t2Dist  = isLong ? (t2 - e) : (e - t2)
+    float slPct   = e > 0 ? riskD / e * 100.0 : 0.0
+    float tp1Pct  = e > 0 ? t1Dist / e * 100.0 : 0.0
+    float reqT1   = singleTpMode ? minTp1SinglePct : minTp1Pct
+    bool floorOk  = slPct >= minSlPct * 0.95 and slPct <= maxSlPct * 1.05 and tp1Pct >= reqT1 * 0.95
+    float rr1     = riskD > 0 ? t1Dist / riskD : 0.0
+    float rr2     = riskD > 0 ? t2Dist / riskD : 0.0
+    float blendRr = singleTpMode ? rr1 : 0.5 * rr1 + 0.5 * rr2
+    bool rrOk     = rr1 >= minRrTp1 and blendRr >= minBlendedRr
+    [notNa and pos and ord and floorOk and rrOk, blendRr]
+
+// ═════════════════════════ INDICATORS & FILTERS ═════════════════════════════
+bbBasis = ta.sma(close, bbLength)
+bbDev   = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+rsiVal  = ta.rsi(close, rsiLength)
+atr     = ta.atr(atrLength)
+atrPct  = close > 0 and not na(atr) ? atr / close * 100.0 : 0.0
+volSma  = nz(ta.sma(volume, rvolLen), 1.0)
+rvol    = volSma > 0 ? volume / volSma : 1.0
+
+bool htfHigher = timeframe.in_seconds(htfTimeframe) > timeframe.in_seconds()
+float locFast  = ta.ema(close, htfFastLen)
+float locSlow  = ta.ema(close, htfSlowLen)
+[htfFastRaw, htfSlowRaw, htfCloseRaw] = request.security(syminfo.tickerid, htfTimeframe, f_htfValues(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+float htfFast  = htfHigher ? htfFastRaw : locFast
+float htfSlow  = htfHigher ? htfSlowRaw : locSlow
+float htfClose = htfHigher ? htfCloseRaw : close
+
+htfBull   = not na(htfFast) and not na(htfSlow) and not na(htfClose) and htfClose > htfFast and htfFast > htfSlow
+htfBear   = not na(htfFast) and not na(htfSlow) and not na(htfClose) and htfClose < htfSlow and htfFast < htfSlow
+volRegOk  = atrPct >= minAtrPct and atrPct <= maxAtrPct
+rvolOk    = rvol >= rvolMin
+cRange    = high - low
+bodyRatio = cRange > 0 ? math.abs(close - open) / cRange : 0.0
+bodyOk    = bodyRatio >= minBodyRatio
+
+reclaimLong  = not na(bbLower[1]) and low[1] <= bbLower[1] and close > open and close > bbLower and bodyOk and rsiVal <= rsiLongMax and rsiVal > nz(rsiVal[1])
+reclaimShort = not na(bbUpper[1]) and high[1] >= bbUpper[1] and close < open and close < bbUpper and bodyOk and rsiVal >= rsiShortMin and rsiVal < nz(rsiVal[1])
+dataOk       = bar_index >= 60 and not na(bbLower) and not na(bbUpper) and not na(rsiVal) and not na(atr) and atr > 0
+
+// ═══════════════════════ VIRTUAL TRADE & RISK STATE ═════════════════════════
+var float sigEntry      = na
+var float sigSl         = na
+var float sigTp1        = na
+var float sigTp2        = na
+var float curSl         = na
+var float lastRr        = na
+var string lastSide     = "—"
+var int   lastAlertBar  = -100000
+var int   vSide         = 0   // 1 = LONG, -1 = SHORT, 0 = flat
+var bool  vTp1Done      = false
+var int   vEntryBar     = -100000
+var int   vExitBar      = -100000
+var int   vTotal        = 0
+var int   vLongTotal    = 0
+var int   vShortTotal   = 0
+var int   vTp1Wins      = 0
+var int   vTp2Wins      = 0
+var int   vSlOnly       = 0
+var int   consecLosses  = 0
+var int   pauseUntilBar = -100000
+var int   alertsToday   = 0
+
+if nz(ta.change(time("1D")), 0) != 0
+    alertsToday := 0
+
+if vSide != 0 and barstate.isconfirmed and bar_index > vEntryBar
+    bool isL   = vSide == 1
+    bool hitSl = isL ? (low <= curSl) : (high >= curSl)
+    bool hitT1 = isL ? (high >= sigTp1) : (low <= sigTp1)
+    bool hitT2 = not singleTpMode and (isL ? (high >= sigTp2) : (low <= sigTp2))
+    bool hitTo = (bar_index - vEntryBar) >= virtualTimeoutBars
+
+    if hitSl and not vTp1Done
+        vTotal       += 1
+        vSlOnly      += 1
+        consecLosses += 1
+        if useLossPause and consecLosses >= maxConsecLosses
+            pauseUntilBar := bar_index + lossPauseBars
+        vSide    := 0
+        vExitBar := bar_index
+    else
+        if hitT1 and not vTp1Done
+            vTp1Done := true
+            curSl    := sigEntry
+        bool closedWin = singleTpMode ? hitT1 : hitT2
+        if closedWin or hitSl or hitTo
+            vTotal += 1
+            if vTp1Done
+                vTp1Wins     += 1
+                consecLosses := 0
+            if hitT2
+                vTp2Wins += 1
+            vSide    := 0
+            vExitBar := bar_index
+
+cooldownOk  = (bar_index - lastAlertBar >= cooldownBars) and (bar_index - vExitBar >= cooldownBars)
+lockOk      = not lockWhileActive or vSide == 0
+riskGuardOk = (not useLossPause or bar_index >= pauseUntilBar) and (maxAlertsPerDay == 0 or alertsToday < maxAlertsPerDay)
+commonOk    = dataOk and barstate.isconfirmed and volRegOk and rvolOk and cooldownOk and lockOk and riskGuardOk
+
+[lEntry, lSl, lTp1, lTp2] = f_levels(true, close, nz(atr, 0.0))
+[lLevelsOk, lRr]          = f_levelsValid(true, lEntry, lSl, lTp1, lTp2)
+[sEntry, sSl, sTp1, sTp2] = f_levels(false, close, nz(atr, 0.0))
+[sLevelsOk, sRr]          = f_levelsValid(false, sEntry, sSl, sTp1, sTp2)
+
+longSignal  = commonOk and enableLong and htfBull and reclaimLong and lLevelsOk
+shortSignal = commonOk and enableShort and not longSignal and htfBear and reclaimShort and sLevelsOk
+anySignal   = longSignal or shortSignal
+
+f_payload(string sideStr, float rrVal) =>
+    string core = '{"secret":"' + cleanSec + '","symbol":"' + f_symbol() + '","side":"' + sideStr + '","market_type":"' + marketType + '","leverage":' + str.tostring(leverageInput) + ',"entry":' + f_num(sigEntry) + ',"sl":' + f_num(sigSl) + ',"tp1":' + f_num(sigTp1) + (singleTpMode ? '' : ',"tp2":' + f_num(sigTp2))
+    string meta = includeMeta ? ',"strategy":"SCALP-1M-PRO","timeframe":"' + timeframe.period + '","alert":"scalp1m_' + str.lower(sideStr) + '_rr' + str.tostring(rrVal, "#.00") + '"' : ''
+    core + meta + '}'
+
+var line lnEntry = na
+var line lnSl    = na
+var line lnTp1   = na
+var line lnTp2   = na
+
+if anySignal
+    bool isL     = longSignal
+    sigEntry     := isL ? lEntry : sEntry
+    sigSl        := isL ? lSl    : sSl
+    sigTp1       := isL ? lTp1   : sTp1
+    sigTp2       := isL ? lTp2   : sTp2
+    curSl        := sigSl
+    lastRr       := isL ? lRr    : sRr
+    lastSide     := isL ? "LONG" : "SHORT"
+    lastAlertBar := bar_index
+    vSide        := isL ? 1 : -1
+    vTp1Done     := false
+    vEntryBar    := bar_index
+    alertsToday  += 1
+    if isL
+        vLongTotal += 1
+    else
+        vShortTotal += 1
+
+    if showLevels
+        if not na(lnEntry) and line.get_x2(lnEntry) >= bar_index
+            line.set_x2(lnEntry, bar_index - 1)
+        if not na(lnSl) and line.get_x2(lnSl) >= bar_index
+            line.set_x2(lnSl, bar_index - 1)
+        if not na(lnTp1) and line.get_x2(lnTp1) >= bar_index
+            line.set_x2(lnTp1, bar_index - 1)
+        if not na(lnTp2) and line.get_x2(lnTp2) >= bar_index
+            line.set_x2(lnTp2, bar_index - 1)
+        int xEnd = bar_index + levelLineBars
+        lnEntry := line.new(bar_index, sigEntry, xEnd, sigEntry, color = color.new(color.white, 0), width = 1, style = line.style_solid)
+        lnSl    := line.new(bar_index, sigSl,    xEnd, sigSl,    color = color.new(color.red,   0), width = 2, style = line.style_solid)
+        lnTp1   := line.new(bar_index, sigTp1,   xEnd, sigTp1,   color = color.new(color.teal,  0), width = 1, style = line.style_dashed)
+        lnTp2   := singleTpMode ? na : line.new(bar_index, sigTp2, xEnd, sigTp2, color = color.new(color.lime, 0), width = 2, style = line.style_dashed)
+
+    if showLabels
+        string slSign = isL ? "-" : "+"
+        string tpSign = isL ? "+" : "-"
+        string head   = isL ? "▲ LONG (" : "▼ SHORT ("
+        string lbl    = head + str.tostring(lastRr, "#.1") + "R)\nEntry: " + f_num(sigEntry) + "\nSL: " + f_num(sigSl) + " (" + slSign + f_pct(sigEntry - sigSl, sigEntry) + ")\nTP1: " + f_num(sigTp1) + " (" + tpSign + f_pct(sigTp1 - sigEntry, sigEntry) + ")" + (singleTpMode ? "" : "\nTP2: " + f_num(sigTp2) + " (" + tpSign + f_pct(sigTp2 - sigEntry, sigEntry) + ")")
+        label.new(bar_index, isL ? low : high, lbl, style = isL ? label.style_label_up : label.style_label_down, color = isL ? color.new(color.green, 10) : color.new(color.red, 10), textcolor = color.white, size = size.small)
+
+    if hookOk
+        alert(f_payload(lastSide, lastRr), alert.freq_once_per_bar_close)
+
+alertcondition(longSignal,  title = "SCALP 1M PRO LONG",  message = '{"secret":"PASTE_YOUR_WEBHOOK_SECRET","symbol":"{{ticker}}","side":"LONG","market_type":"futures","leverage":5,"entry":{{plot("entry")}},"sl":{{plot("sl")}},"tp1":{{plot("tp1")}},"tp2":{{plot("tp2")}},"strategy":"SCALP-1M-PRO","timeframe":"{{interval}}"}')
+alertcondition(shortSignal, title = "SCALP 1M PRO SHORT", message = '{"secret":"PASTE_YOUR_WEBHOOK_SECRET","symbol":"{{ticker}}","side":"SHORT","market_type":"futures","leverage":5,"entry":{{plot("entry")}},"sl":{{plot("sl")}},"tp1":{{plot("tp1")}},"tp2":{{plot("tp2")}},"strategy":"SCALP-1M-PRO","timeframe":"{{interval}}"}')
+
+// ═════════════════════════════ VISUALS ══════════════════════════════════════
+plot(bbUpper, "BB Upper", color.new(color.red,  50), 1)
+plot(bbLower, "BB Lower", color.new(color.teal, 50), 1)
+plot(showLevels and longSignal  ? sigEntry : na, "LONG Entry Point",  color = color.new(color.lime, 0), style = plot.style_circles, linewidth = 3)
+plot(showLevels and shortSignal ? sigEntry : na, "SHORT Entry Point", color = color.new(color.red,  0), style = plot.style_circles, linewidth = 3)
+plot(sigEntry, "entry", display = display.data_window)
+plot(sigSl,    "sl",    display = display.data_window)
+plot(sigTp1,   "tp1",   display = display.data_window)
+plot(singleTpMode ? na : sigTp2, "tp2", display = display.data_window)
+plotshape(longSignal,  "LONG Entry Marker",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size = size.small)
+plotshape(shortSignal, "SHORT Entry Marker", shape.triangledown, location.abovebar, color.new(color.red,  0), size = size.small)
+bgcolor(longSignal ? color.new(color.green, 82) : shortSignal ? color.new(color.red, 82) : na, title = "Alert bar")
+
+var table dash = table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 80), border_width = 1)
+f_row(table tbl, int r, string k, string v, color c) =>
+    table.cell(tbl, 0, r, k, text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, r, v, text_color = c, text_size = size.small)
+
+if showTable and barstate.islast
+    string whStat  = not sendAlerts ? "Paused" : not secretOk ? "⚠ Set secret" : not tfOk ? "⚠ Use 1m TF" : not routeOk ? "⚠ Not perp" : "✓ Armed (" + f_symbol() + ")"
+    color  whCol   = hookOk ? color.lime : (not sendAlerts ? color.gray : color.red)
+    string htfStat = htfBull ? "Bull ▲ (LONG ok)" : htfBear ? "Bear ▼ (SHORT ok)" : "Neutral"
+    color  htfCol  = htfBull ? color.lime : htfBear ? color.red : color.gray
+    string rgStat  = not riskGuardOk ? (bar_index < pauseUntilBar ? "⏸ Streak pause" : "⏸ Daily cap") : (vSide == 1 ? "🔒 Active LONG" : vSide == -1 ? "🔒 Active SHORT" : "OK (" + str.tostring(alertsToday) + "/" + str.tostring(maxAlertsPerDay) + ")")
+    float  t1Hit   = vTotal > 0 ? vTp1Wins * 100.0 / vTotal : 0.0
+    float  t2Hit   = vTotal > 0 ? vTp2Wins * 100.0 / vTotal : 0.0
+
+    f_row(dash, 0, "Webhook",    whStat, whCol)
+    f_row(dash, 1, "TF",         tfOk ? "1m ✓" : timeframe.period + " (need 1m)", tfOk ? color.lime : color.red)
+    f_row(dash, 2, "HTF 15m",    htfStat, htfCol)
+    f_row(dash, 3, "RSI / RVOL", str.tostring(rsiVal, "#.1") + " / " + str.tostring(rvol, "#.2") + "x", rvolOk ? color.lime : color.silver)
+    f_row(dash, 4, "ATR%",       str.tostring(atrPct, "#.2") + "%", volRegOk ? color.lime : color.orange)
+    f_row(dash, 5, "Risk Guard", rgStat, not riskGuardOk ? color.red : vSide != 0 ? color.yellow : color.lime)
+    f_row(dash, 6, "Last Side",  lastSide + (not na(lastRr) ? " (" + str.tostring(lastRr, "#.1") + "R)" : ""), lastSide == "LONG" ? color.lime : lastSide == "SHORT" ? color.red : color.gray)
+    f_row(dash, 7, "Levels",     "E " + f_num(sigEntry) + " · SL " + f_num(sigSl) + " · TP1 " + f_num(sigTp1) + (singleTpMode ? "" : " · TP2 " + f_num(sigTp2)), color.white)
+    f_row(dash, 8, "V-Stats",    vTotal > 0 ? str.tostring(vTotal) + " (L:" + str.tostring(vLongTotal) + "/S:" + str.tostring(vShortTotal) + ") · TP1 " + str.tostring(t1Hit, "#.0") + "% · TP2 " + str.tostring(t2Hit, "#.0") + "% · SL " + str.tostring(vSlOnly) : "0 trades", color.aqua)
+    f_row(dash, 9, "Mode",       "1M COMBINED L+S · " + (singleTpMode ? "Single TP" : "50/50 Split"), color.yellow)
