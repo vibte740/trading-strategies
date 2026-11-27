@@ -1,0 +1,495 @@
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════
+//  SQZFLOW v3 — Squeeze Flow Scalper (5m) · Webhook edition
+//  LazyBear Squeeze Momentum + MFI + CMF + optional EMA / HTF alignment
+//
+//  v3 changes (LONG-suppression fix)
+//   • Three independent triggers per side: squeeze release, momentum shift
+//     (red→maroon / lime→green), zero-cross. v2 only had squeeze release.
+//   • Release no longer requires momentum on the "right" side of zero.
+//   • HTF / EMA alignment are separate per-side toggles, default OFF.
+//   • CMF default = "not opposing" with tolerance instead of "must agree".
+//   • MFI uses an N-bar slope and per-side limits (mfiLongMax / mfiShortMin).
+//   • Reversal on by default; cooldown and "one trade per fire" are per direction.
+//   • Debug panel: every LONG/SHORT condition at a chosen bar + live, and
+//     ✕ markers where a trigger fired but a filter blocked it.
+//
+//  EXECUTION MODEL
+//   • process_orders_on_close = true, calc_on_every_tick = false → evaluated
+//     once per confirmed bar; entry fills at that bar's close.
+//   • entry / sl / tp1 / tp2 / atr are stored in `var` on the entry bar and
+//     never recalculated. Only sl changes, once, to breakeven after TP1.
+//   • Exit events are read from filled orders and alerted at the close of the
+//     bar where the fill happened.
+//
+//  ALERT: one alert → this strategy → "alert() function calls only".
+//  (alertcondition() is indicator-only; Pine rejects it inside strategy().)
+// ════════════════════════════════════════════════════════════════════════════
+strategy(
+     title                   = "Squeeze Flow Scalper v3 · Webhook (5m)",
+     shorttitle              = "SQZFLOW-v3",
+     overlay                 = true,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 10,
+     pyramiding              = 0,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.05,
+     slippage                = 2,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     max_labels_count        = 500,
+     max_bars_back           = 2000)
+
+// ═══════════════════════════════ INPUTS ═════════════════════════════════════
+const string G_DIR  = "① Direction & execution"
+enableLong          = input.bool(true,  "Enable LONG",                         group=G_DIR)
+enableShort         = input.bool(true,  "Enable SHORT",                        group=G_DIR)
+allowReversal       = input.bool(true,  "Allow reversal on opposite signal",   group=G_DIR,
+     tooltip="On: an opposite signal closes the open trade and enters the other side on the same bar.\nOff: positions are locked until SL/TP (see next option).")
+exitOnOpposite      = input.bool(true,  "If reversal off: close on opposite signal", group=G_DIR)
+cooldownBars        = input.int(3,      "Cooldown bars",                       minval=0, maxval=200, group=G_DIR)
+cooldownSameDirOnly = input.bool(true,  "Cooldown applies to same direction only", group=G_DIR,
+     tooltip="On: a SHORT entry/exit never delays a LONG (and vice versa).")
+
+const string G_SQZ  = "② Squeeze Momentum"
+bbLength            = input.int(20,     "BB Length",                 minval=5,   group=G_SQZ)
+bbMult              = input.float(2.0,  "BB Mult",                   minval=0.5, step=0.1, group=G_SQZ)
+kcLength            = input.int(20,     "KC Length",                 minval=5,   group=G_SQZ)
+kcMult              = input.float(1.5,  "KC Mult",                   minval=0.5, step=0.1, group=G_SQZ)
+useTrueRange        = input.bool(true,  "KC uses True Range",        group=G_SQZ)
+minSqzBars          = input.int(3,      "Min squeeze duration (bars)", minval=1, maxval=100, group=G_SQZ)
+releaseWindow       = input.int(6,      "Release entry window (bars)", minval=0, maxval=30, group=G_SQZ)
+oneTradePerFire     = input.bool(true,  "One trade per fire (per direction)", group=G_SQZ)
+
+const string G_TRG  = "③ Triggers"
+useReleaseTrigger   = input.bool(true,  "Trigger: squeeze release + momentum rising/falling", group=G_TRG)
+releaseNeedsSignedMom = input.bool(false, "Release requires momentum on its side of zero", group=G_TRG,
+     tooltip="v2 behaviour (ON) missed longs that release while the histogram is still below zero.")
+useShiftTrigger     = input.bool(true,  "Trigger: momentum shift (red→maroon / lime→green)", group=G_TRG)
+shiftLookback       = input.int(10,     "Shift: MFI lookback (bars)", minval=1, maxval=100, group=G_TRG)
+shiftMfiLongMax     = input.float(35,   "Shift LONG: MFI dipped ≤",  minval=0, maxval=100, group=G_TRG)
+shiftMfiShortMin    = input.float(65,   "Shift SHORT: MFI peaked ≥", minval=0, maxval=100, group=G_TRG)
+useZeroCross        = input.bool(true,  "Trigger: momentum zero-cross", group=G_TRG)
+requireAccel        = input.bool(false, "Require histogram acceleration", group=G_TRG)
+
+const string G_MF   = "④ Money flow"
+mfiLength           = input.int(14,     "MFI Length",                minval=2, group=G_MF)
+mfiUseWicks         = input.bool(true,  "MFI source hlc3 (off = oc2)", group=G_MF)
+mfiOversold         = input.float(20,   "MFI oversold (display)",    minval=0,  maxval=50,  group=G_MF)
+mfiOverbought       = input.float(80,   "MFI overbought (display)",  minval=50, maxval=100, group=G_MF)
+mfiLongMax          = input.float(80,   "LONG: MFI must be ≤",       minval=0,  maxval=100, group=G_MF)
+mfiShortMin         = input.float(20,   "SHORT: MFI must be ≥",      minval=0,  maxval=100, group=G_MF)
+requireMfiSlope     = input.bool(true,  "MFI must slope with the trade", group=G_MF)
+mfiSlopeBars        = input.int(2,      "MFI slope lookback (bars)", minval=1, maxval=20, group=G_MF)
+useCmfFilter        = input.bool(true,  "Use CMF filter",            group=G_MF)
+cmfLength           = input.int(20,     "CMF Length",                minval=5, group=G_MF)
+cmfMode             = input.string("Not opposing", "CMF mode", options=["Not opposing", "Must agree"], group=G_MF,
+     tooltip="Not opposing: LONG needs CMF > -tolerance.\nMust agree: LONG needs CMF > 0.")
+cmfTolerance        = input.float(0.05, "CMF tolerance",             minval=0.0, step=0.01, group=G_MF)
+
+const string G_TRD  = "⑤ Trend alignment"
+requireHtfAlignForLong  = input.bool(false, "LONG requires HTF uptrend",   group=G_TRD)
+requireHtfAlignForShort = input.bool(false, "SHORT requires HTF downtrend", group=G_TRD)
+htfTimeframe        = input.timeframe("15", "HTF timeframe",          group=G_TRD)
+htfEmaLength        = input.int(50,     "HTF EMA length",             minval=5, group=G_TRD)
+htfRequireSlope     = input.bool(true,  "HTF alignment also needs EMA slope", group=G_TRD)
+requireEmaAlignForLong  = input.bool(false, "LONG requires close > EMA baseline",  group=G_TRD)
+requireEmaAlignForShort = input.bool(false, "SHORT requires close < EMA baseline", group=G_TRD)
+emaBaseLength       = input.int(200,    "EMA baseline length",        minval=5, group=G_TRD)
+
+const string G_RISK = "⑥ Risk & targets"
+atrLength           = input.int(14,     "ATR Length",                minval=2,   group=G_RISK)
+slAtrMult           = input.float(1.2,  "SL = ATR ×",                minval=0.2, step=0.1, group=G_RISK)
+tpMode              = input.string("ATR multiple", "TP mode", options=["ATR multiple", "R multiple"], group=G_RISK)
+tp1AtrMult          = input.float(1.2,  "TP1 = ATR ×",               minval=0.2, step=0.1, group=G_RISK)
+tp2AtrMult          = input.float(2.4,  "TP2 = ATR ×",               minval=0.3, step=0.1, group=G_RISK)
+tp1RMult            = input.float(1.0,  "TP1 = R ×",                 minval=0.2, step=0.1, group=G_RISK)
+tp2RMult            = input.float(2.0,  "TP2 = R ×",                 minval=0.3, step=0.1, group=G_RISK)
+tp1QtyPct           = input.int(50,     "TP1 closes % of position",  minval=1, maxval=99, group=G_RISK)
+useBreakeven        = input.bool(true,  "Move SL to breakeven after TP1", group=G_RISK)
+beOffsetAtr         = input.float(0.05, "Breakeven offset (ATR ×)",  minval=0.0, step=0.05, group=G_RISK)
+
+const string G_HOOK = "⑦ Webhook"
+sendAlerts          = input.bool(true,  "Send alert() JSON",         group=G_HOOK)
+secretKey           = input.string("dxy4cOVDSx9e_Xj7zzexCV4cB72Vq1xLKoSxsNpV5RQ", "secret", group=G_HOOK)
+symbolFormat        = input.string("clean", "symbol format", options=["clean", "ticker", "tickerid"], group=G_HOOK,
+     tooltip="clean = SOLUSDT · ticker = SOLUSDT.P · tickerid = BINANCE:SOLUSDT.P")
+marketType          = input.string("futures", "market_type", options=["futures", "spot"], group=G_HOOK)
+leverageInput       = input.int(5,      "leverage",                  minval=1, maxval=125, group=G_HOOK)
+sendExitEvents      = input.bool(false, "Also send TP1/BE/SL/TP2/CLOSE events", group=G_HOOK,
+     tooltip="Off (default): only LONG/SHORT entry alerts are sent — the receiver manages SL/TP1/TP2 itself.\nOn: exit events are sent in the same JSON shape with side = TP1 | BE | SL | TP2 | CLOSE.")
+
+const string G_VIS  = "⑧ Visuals & debug"
+showLevels          = input.bool(true,  "Show Entry / SL / TP lines", group=G_VIS)
+showLabels          = input.bool(true,  "Show event labels",          group=G_VIS)
+showTable           = input.bool(true,  "Show status table",          group=G_VIS)
+debugLongConditions = input.bool(true,  "Debug: condition panel + blocked-trigger marks", group=G_VIS)
+debugTime           = input.time(timestamp("25 Nov 2026 20:00 +0300"), "Debug bar (time)", group=G_VIS,
+     tooltip="The panel shows every LONG/SHORT condition on the bar containing this time.")
+
+// ══════════════════════════════ HELPERS ═════════════════════════════════════
+f_sqzMomentum(int len) =>
+    float donchianMid = (ta.highest(high, len) + ta.lowest(low, len)) / 2.0
+    ta.linreg(close - (donchianMid + ta.sma(close, len)) / 2.0, len, 0)
+
+f_mfi(float src, int len) =>
+    float ch  = nz(ta.change(src))
+    float pos = math.sum(volume * (ch > 0 ? src : 0.0), len)
+    float neg = math.sum(volume * (ch < 0 ? src : 0.0), len)
+    pos + neg == 0.0 ? 50.0 : neg == 0.0 ? 100.0 : 100.0 - 100.0 / (1.0 + pos / neg)
+
+// Confirmed HTF values only (previous HTF bar + lookahead_on → no repaint)
+f_htfValues() =>
+    float e = ta.ema(close, htfEmaLength)
+    [e[1], e[2], close[1]]
+
+f_levels(int dir, float entry, float atrVal) =>
+    float risk = slAtrMult * atrVal
+    float sl   = entry - dir * risk
+    float t1   = tpMode == "ATR multiple" ? entry + dir * tp1AtrMult * atrVal : entry + dir * tp1RMult * risk
+    float t2   = tpMode == "ATR multiple" ? entry + dir * tp2AtrMult * atrVal : entry + dir * tp2RMult * risk
+    [sl, t1, t2]
+
+f_symbol() =>
+    symbolFormat == "tickerid" ? syminfo.tickerid : symbolFormat == "ticker" ? syminfo.ticker : str.replace_all(syminfo.ticker, ".P", "")
+
+f_num(float v) =>
+    na(v) ? "null" : str.tostring(v, format.mintick)
+
+f_dirStr(int dir) =>
+    dir == 1 ? "LONG" : dir == -1 ? "SHORT" : "FLAT"
+
+// LazyBear colour states with unambiguous text
+f_momState(float m, float step) =>
+    m >= 0 ? (step >= 0 ? "Bull ▲ strengthening (lime)" : "Bull ▼ weakening (green)") : (step <= 0 ? "Bear ▼ strengthening (red)" : "Bear ▲ weakening (maroon)")
+f_momColor(float m, float step) =>
+    m >= 0 ? (step >= 0 ? color.lime : color.green) : (step <= 0 ? color.red : color.maroon)
+
+f_mark(bool b) =>
+    b ? "✓" : "✗"
+f_markColor(bool b) =>
+    b ? color.lime : color.red
+
+f_label(float y, string txt, color bg, bool below) =>
+    if showLabels
+        label.new(bar_index, y, txt, style=below ? label.style_label_up : label.style_label_down,
+             color=bg, textcolor=color.white, size=size.small)
+
+// ═════════════════════════ 1. SQUEEZE MOMENTUM ══════════════════════════════
+bbBasis = ta.sma(close, bbLength)
+bbDev   = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+kcBasis = ta.sma(close, kcLength)
+kcRange = useTrueRange ? ta.tr(true) : high - low
+kcWidth = ta.sma(kcRange, kcLength) * kcMult
+kcUpper = kcBasis + kcWidth
+kcLower = kcBasis - kcWidth
+
+sqzOn   = bbLower > kcLower and bbUpper < kcUpper
+sqzOff  = bbLower < kcLower and bbUpper > kcUpper
+
+mom      = f_sqzMomentum(kcLength)
+momStep  = mom - nz(mom[1])
+prevStep = nz(momStep[1])
+momUp    = momStep > 0
+momDn    = momStep < 0
+accelUp  = momStep > prevStep
+accelDn  = momStep < prevStep
+momXUp   = ta.crossover(mom, 0.0)
+momXDn   = ta.crossunder(mom, 0.0)
+
+var int sqzRun = 0
+sqzRun := sqzOn ? sqzRun + 1 : 0
+sqzFired = sqzOn[1] and not sqzOn and sqzRun[1] >= minSqzBars
+
+var int fireBar     = na
+var int tradedFireL = na
+var int tradedFireS = na
+if sqzFired
+    fireBar := bar_index
+inFireWindow = not na(fireBar) and bar_index - fireBar <= releaseWindow
+freshL = not oneTradePerFire or na(tradedFireL) or tradedFireL != fireBar
+freshS = not oneTradePerFire or na(tradedFireS) or tradedFireS != fireBar
+
+// ═══════════════════════════ 2. MONEY FLOW ══════════════════════════════════
+mfi        = f_mfi(mfiUseWicks ? hlc3 : (open + close) / 2.0, mfiLength)
+mfiLowRec  = ta.lowest(mfi, shiftLookback)
+mfiHighRec = ta.highest(mfi, shiftLookback)
+mfiSlopeUp = mfi > nz(mfi[mfiSlopeBars])
+mfiSlopeDn = mfi < nz(mfi[mfiSlopeBars])
+mfiOkL     = mfi <= mfiLongMax  and (not requireMfiSlope or mfiSlopeUp)
+mfiOkS     = mfi >= mfiShortMin and (not requireMfiSlope or mfiSlopeDn)
+
+clv    = high > low ? ((close - low) - (high - close)) / (high - low) : 0.0
+volSum = math.sum(volume, cmfLength)
+mfvSum = math.sum(clv * volume, cmfLength)
+cmf    = volSum > 0 ? mfvSum / volSum : 0.0
+cmfOkL = not useCmfFilter or (cmfMode == "Must agree" ? cmf > 0.0 : cmf > -cmfTolerance)
+cmfOkS = not useCmfFilter or (cmfMode == "Must agree" ? cmf < 0.0 : cmf < cmfTolerance)
+
+// ═════════════════════════════ 3. TREND ═════════════════════════════════════
+emaBase = ta.ema(close, emaBaseLength)
+[htfEma, htfEmaPrev, htfClose] = request.security(syminfo.tickerid, htfTimeframe, f_htfValues(), lookahead=barmerge.lookahead_on)
+htfBull = htfClose > htfEma and (not htfRequireSlope or htfEma >= htfEmaPrev)
+htfBear = htfClose < htfEma and (not htfRequireSlope or htfEma <= htfEmaPrev)
+htfOkL  = not requireHtfAlignForLong  or htfBull
+htfOkS  = not requireHtfAlignForShort or htfBear
+emaOkL  = not requireEmaAlignForLong  or close > emaBase
+emaOkS  = not requireEmaAlignForShort or close < emaBase
+
+// ═════════════════════════════ 4. ATR ═══════════════════════════════════════
+atr    = ta.atr(atrLength)
+dataOk = not na(mom) and not na(mfi) and not na(atr) and atr > 0
+
+// ═══════════════════════════ 5. TRIGGERS ════════════════════════════════════
+trigRelL   = useReleaseTrigger and inFireWindow and freshL and momUp and (not releaseNeedsSignedMom or mom > 0)
+trigRelS   = useReleaseTrigger and inFireWindow and freshS and momDn and (not releaseNeedsSignedMom or mom < 0)
+trigShiftL = useShiftTrigger and mom < 0 and momUp and prevStep <= 0 and mfiLowRec  <= shiftMfiLongMax
+trigShiftS = useShiftTrigger and mom > 0 and momDn and prevStep >= 0 and mfiHighRec >= shiftMfiShortMin
+trigZeroL  = useZeroCross and momXUp
+trigZeroS  = useZeroCross and momXDn
+accelOkL   = not requireAccel or accelUp
+accelOkS   = not requireAccel or accelDn
+anyTrigL   = (trigRelL or trigShiftL or trigZeroL) and accelOkL
+anyTrigS   = (trigRelS or trigShiftS or trigZeroS) and accelOkS
+
+// Signal quality (independent of position / cooldown)
+coreL = dataOk and enableLong  and anyTrigL and mfiOkL and cmfOkL and htfOkL and emaOkL
+coreS = dataOk and enableShort and anyTrigS and mfiOkS and cmfOkS and htfOkS and emaOkS
+
+// ═══════════════════════ 6. POSITION STATE & EVENTS ═════════════════════════
+var float posEntry = na
+var float posSl    = na
+var float posTp1   = na
+var float posTp2   = na
+var float posAtr   = na
+var int   posDir   = 0
+var bool  tp1Hit   = false
+var int   lastEntryBar = -100000
+var int   lastEntryDir = 0
+var int   lastExitBar  = -100000
+var int   lastExitDir  = 0
+var int   prevClosed   = 0
+var string lastEvent   = "—"
+var int   nLong  = 0
+var int   nShort = 0
+var int   nTP1   = 0
+var int   nTP2   = 0
+var int   nSL    = 0
+var int   nBE    = 0
+var int   nClose = 0
+
+size = strategy.position_size
+
+// Receiver format:
+// {"secret":"…","symbol":"SOLUSDT","side":"LONG","market_type":"futures","leverage":5,"entry":67.5,"sl":66.5,"tp1":68.5,"tp2":69.5}
+f_payload(string side) =>
+    '{"secret":"'       + secretKey                    + '"' +
+     ',"symbol":"'      + f_symbol()                   + '"' +
+     ',"side":"'        + side                         + '"' +
+     ',"market_type":"' + marketType                   + '"' +
+     ',"leverage":'     + str.tostring(leverageInput)  +
+     ',"entry":'        + f_num(posEntry)              +
+     ',"sl":'           + f_num(posSl)                 +
+     ',"tp1":'          + f_num(posTp1)                +
+     ',"tp2":'          + f_num(posTp2)                + '}'
+
+// action/reason are kept for chart labels / filtering; they are not in the JSON
+f_send(string side, string action, string reason) =>
+    if sendAlerts and (action == "ENTRY" or sendExitEvents)
+        alert(f_payload(side), alert.freq_once_per_bar_close)
+
+// Fills on this bar, read from the closed-trade list by exit comment
+bool evTP1 = false
+bool evTP2 = false
+bool evSL  = false
+bool evBE  = false
+int nClosedNow = strategy.closedtrades
+if nClosedNow > prevClosed
+    for i = prevClosed to nClosedNow - 1
+        string c = strategy.closedtrades.exit_comment(i)
+        if c == "TP1"
+            evTP1 := true
+        else if c == "TP2"
+            evTP2 := true
+        else if c == "SL"
+            evSL := true
+        else if c == "BE"
+            evBE := true
+    prevClosed := nClosedNow
+
+// TP1 → partial exit, then breakeven update
+if evTP1 and posDir != 0 and not tp1Hit
+    tp1Hit    := true
+    nTP1      += 1
+    lastEvent := "TP1"
+    f_label(posTp1, "TP1", color.new(color.teal, 0), posDir == -1)
+    f_send("TP1", "EXIT", "TP1")
+    if useBreakeven and size != 0
+        posSl     := posEntry + posDir * beOffsetAtr * posAtr
+        lastEvent := "TP1 · SL→BE"
+        f_send("BE", "UPDATE", "SL_TO_BREAKEVEN")
+
+// Position fully closed by the bracket (bar_index check also catches same-bar open/close)
+if posDir != 0 and size == 0 and bar_index > lastEntryBar
+    string why = evTP2 ? "TP2" : evBE ? "BE" : evSL ? "SL" : "CLOSE"
+    if why == "TP2"
+        nTP2 += 1
+    else if why == "BE"
+        nBE += 1
+    else if why == "SL"
+        nSL += 1
+    else
+        nClose += 1
+    lastEvent := why
+    f_label(why == "TP2" ? posTp2 : posSl, why, why == "TP2" ? color.new(color.green, 0) : why == "BE" ? color.new(color.gray, 0) : color.new(color.red, 0), posDir == -1)
+    f_send(why, "EXIT", why)
+    lastExitBar := bar_index
+    lastExitDir := posDir
+    posDir      := 0
+    tp1Hit      := false
+
+// ═════════════════════════ 7. GATES & ENTRIES ═══════════════════════════════
+f_coolOk(int dir) =>
+    bool entryOk = (cooldownSameDirOnly and lastEntryDir != dir) or bar_index - lastEntryBar >= cooldownBars
+    bool exitOk  = (cooldownSameDirOnly and lastExitDir  != dir) or bar_index - lastExitBar  >= cooldownBars
+    entryOk and exitOk
+
+posFreeL = size == 0 or (size < 0 and allowReversal)
+posFreeS = size == 0 or (size > 0 and allowReversal)
+coolOkL  = f_coolOk(1)
+coolOkS  = f_coolOk(-1)
+
+longEntry  = coreL and posFreeL and coolOkL
+shortEntry = coreS and posFreeS and coolOkS and not longEntry
+
+// Reversal disabled → close on opposite signal (no new entry this bar)
+if not allowReversal and exitOnOpposite and size != 0 and posDir != 0
+    if (posDir == -1 and coreL) or (posDir == 1 and coreS)
+        strategy.close(posDir == 1 ? "L" : "S", comment="OPPOSITE")
+        nClose    += 1
+        lastEvent := "CLOSE (opposite)"
+        f_label(close, "CLOSE", color.new(color.orange, 0), posDir == -1)
+        f_send("CLOSE", "EXIT", "OPPOSITE_SIGNAL")
+        lastExitBar := bar_index
+        lastExitDir := posDir
+        posDir      := 0
+        tp1Hit      := false
+
+if longEntry or shortEntry
+    int newDir = longEntry ? 1 : -1
+    if size != 0 and posDir == -newDir
+        nClose    += 1
+        f_label(close, "REV", color.new(color.orange, 0), newDir == -1)
+        f_send("CLOSE", "EXIT", "REVERSE")
+        lastExitBar := bar_index
+        lastExitDir := posDir
+    string trigTag = newDir == 1 ? (trigRelL ? "REL" : trigShiftL ? "SHIFT" : "ZERO") : (trigRelS ? "REL" : trigShiftS ? "SHIFT" : "ZERO")
+    [sl, t1, t2] = f_levels(newDir, close, atr)
+    posEntry     := close
+    posSl        := sl
+    posTp1       := t1
+    posTp2       := t2
+    posAtr       := atr
+    posDir       := newDir
+    tp1Hit       := false
+    lastEntryBar := bar_index
+    lastEntryDir := newDir
+    if newDir == 1
+        nLong += 1
+        if trigRelL
+            tradedFireL := fireBar
+        strategy.entry("L", strategy.long, comment="LONG " + trigTag)
+    else
+        nShort += 1
+        if trigRelS
+            tradedFireS := fireBar
+        strategy.entry("S", strategy.short, comment="SHORT " + trigTag)
+    lastEvent := f_dirStr(newDir) + " · " + trigTag
+    f_label(newDir == 1 ? low : high, f_dirStr(newDir) + " " + trigTag, newDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0), newDir == 1)
+    f_send(f_dirStr(newDir), "ENTRY", trigTag)
+
+// ═══════════════════════════ 8. BRACKET ═════════════════════════════════════
+string slTag = tp1Hit and useBreakeven ? "BE" : "SL"
+if posDir == 1
+    if not tp1Hit
+        strategy.exit("L-TP1", from_entry="L", qty_percent=tp1QtyPct, stop=posSl, limit=posTp1, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("L-TP2", from_entry="L", stop=posSl, limit=posTp2, comment_profit="TP2", comment_loss=slTag)
+else if posDir == -1
+    if not tp1Hit
+        strategy.exit("S-TP1", from_entry="S", qty_percent=tp1QtyPct, stop=posSl, limit=posTp1, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("S-TP2", from_entry="S", stop=posSl, limit=posTp2, comment_profit="TP2", comment_loss=slTag)
+
+// ═══════════════════════════ 9. VISUALS ═════════════════════════════════════
+showLv = showLevels and posDir != 0
+plot(requireEmaAlignForLong or requireEmaAlignForShort ? emaBase : na, "EMA baseline", color.new(color.orange, 20), 2)
+plot(showLv ? posEntry : na, "Entry", color.new(color.gray, 0),  style=plot.style_linebr)
+plot(showLv ? posSl    : na, "SL",    color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
+plot(showLv ? posTp1   : na, "TP1",   color.new(color.teal, 0),  style=plot.style_linebr)
+plot(showLv ? posTp2   : na, "TP2",   color.new(color.green, 0), style=plot.style_linebr)
+plotshape(sqzFired, "Squeeze fired", shape.diamond, location.bottom, color.new(color.blue, 0), size=size.tiny)
+plotshape(debugLongConditions and anyTrigL and not longEntry,  "LONG trigger blocked",  shape.xcross, location.belowbar, color.new(color.lime, 30), size=size.tiny)
+plotshape(debugLongConditions and anyTrigS and not shortEntry, "SHORT trigger blocked", shape.xcross, location.abovebar, color.new(color.red, 30),  size=size.tiny)
+bgcolor(sqzOn ? color.new(color.orange, 92) : na, title="Squeeze ON")
+bgcolor(longEntry ? color.new(color.green, 80) : shortEntry ? color.new(color.red, 80) : na, title="Entry bar")
+
+// ── Status table
+var table dash = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 80), border_width=1)
+f_row(int r, string k, string v, color c) =>
+    table.cell(dash, 0, r, k, text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, r, v, text_color=c, text_size=size.small)
+
+if showTable and barstate.islast
+    f_row(0,  "TF",        timeframe.period == "5" ? "5m ✓" : timeframe.period + " (built for 5m)", timeframe.period == "5" ? color.lime : color.orange)
+    f_row(1,  "Squeeze",   sqzOn ? "ON · " + str.tostring(sqzRun) + " bars" : sqzOff ? "OFF (released)" : "neutral", sqzOn ? color.orange : color.white)
+    f_row(2,  "Momentum",  f_momState(mom, momStep), f_momColor(mom, momStep))
+    f_row(3,  "MFI",       str.tostring(mfi, "#.0"), mfi >= mfiOverbought ? color.red : mfi <= mfiOversold ? color.lime : color.white)
+    f_row(4,  "CMF",       str.tostring(cmf, "#.000"), cmf > cmfTolerance ? color.lime : cmf < -cmfTolerance ? color.red : color.white)
+    f_row(5,  "HTF " + htfTimeframe, htfBull ? "bull" : htfBear ? "bear" : "mixed", htfBull ? color.lime : htfBear ? color.red : color.gray)
+    f_row(6,  "EMA " + str.tostring(emaBaseLength), close > emaBase ? "above" : "below", close > emaBase ? color.lime : color.red)
+    f_row(7,  "Position",  posDir == 0 ? "flat" : f_dirStr(posDir) + (tp1Hit ? " · TP1 ✓" : "") + " · SL " + f_num(posSl), posDir == 1 ? color.lime : posDir == -1 ? color.red : color.white)
+    f_row(8,  "Entries",   "L " + str.tostring(nLong) + " · S " + str.tostring(nShort), color.white)
+    f_row(9,  "Exits",     "TP1 " + str.tostring(nTP1) + " · TP2 " + str.tostring(nTP2) + " · SL " + str.tostring(nSL) + " · BE " + str.tostring(nBE) + " · CL " + str.tostring(nClose), color.white)
+    f_row(10, "Last",      lastEvent, color.white)
+
+// ── Debug panel: every condition, at the debug bar and now
+var array<string> condNames = array.from("Data ready", "Direction enabled", "Trig: squeeze release", "Trig: momentum shift",
+     "Trig: zero-cross", "Acceleration ok", "ANY trigger", "MFI limit + slope", "CMF filter", "HTF align", "EMA align",
+     "Position free", "Cooldown ok", "➜ ENTRY")
+condL = array.from(dataOk, enableLong,  trigRelL, trigShiftL, trigZeroL, accelOkL, anyTrigL, mfiOkL, cmfOkL, htfOkL, emaOkL, posFreeL, coolOkL, longEntry)
+condS = array.from(dataOk, enableShort, trigRelS, trigShiftS, trigZeroS, accelOkS, anyTrigS, mfiOkS, cmfOkS, htfOkS, emaOkS, posFreeS, coolOkS, shortEntry)
+
+isDebugBar = time <= debugTime and debugTime < time_close
+var array<bool> dbgL = array.new<bool>(14, false)
+var array<bool> dbgS = array.new<bool>(14, false)
+var bool   dbgFound = false
+var string dbgVals  = ""
+if isDebugBar
+    dbgL     := array.copy(condL)
+    dbgS     := array.copy(condS)
+    dbgFound := true
+    dbgVals  := "mom " + str.tostring(mom, "#.####") + " · MFI " + str.tostring(mfi, "#.0") + " · CMF " + str.tostring(cmf, "#.000") + " · " + f_momState(mom, momStep)
+bgcolor(debugLongConditions and isDebugBar ? color.new(color.purple, 60) : na, title="Debug bar")
+
+var table dbg = table.new(position.bottom_left, 5, 16, bgcolor=color.new(color.black, 75), border_width=1)
+if debugLongConditions and barstate.islast
+    table.cell(dbg, 0, 0, "Condition",  text_color=color.white, text_size=size.tiny)
+    table.cell(dbg, 1, 0, "L @dbg",     text_color=color.white, text_size=size.tiny)
+    table.cell(dbg, 2, 0, "S @dbg",     text_color=color.white, text_size=size.tiny)
+    table.cell(dbg, 3, 0, "L now",      text_color=color.white, text_size=size.tiny)
+    table.cell(dbg, 4, 0, "S now",      text_color=color.white, text_size=size.tiny)
+    for i = 0 to array.size(condNames) - 1
+        bool bl = array.get(condL, i)
+        bool bs = array.get(condS, i)
+        table.cell(dbg, 0, i + 1, array.get(condNames, i), text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(dbg, 1, i + 1, dbgFound ? f_mark(array.get(dbgL, i)) : "–", text_color=dbgFound ? f_markColor(array.get(dbgL, i)) : color.gray, text_size=size.tiny)
+        table.cell(dbg, 2, i + 1, dbgFound ? f_mark(array.get(dbgS, i)) : "–", text_color=dbgFound ? f_markColor(array.get(dbgS, i)) : color.gray, text_size=size.tiny)
+        table.cell(dbg, 3, i + 1, f_mark(bl), text_color=f_markColor(bl), text_size=size.tiny)
+        table.cell(dbg, 4, i + 1, f_mark(bs), text_color=f_markColor(bs), text_size=size.tiny)
+    table.cell(dbg, 0, 15, dbgFound ? "@dbg: " + dbgVals : "Debug bar not in loaded history", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
+
+if debugLongConditions and barstate.isfirst
+    table.merge_cells(dbg, 0, 15, 4, 15)
